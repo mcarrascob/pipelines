@@ -119,7 +119,16 @@ class Pipeline:
                 "total_tokens": input_tokens + output_tokens,
                 "total_cost": total_cost,
             },
-            metadata={"interface": "open-webui"},
+            metadata={
+                "interface": "open-webui",
+                "output_tokens": output_tokens,  # Explicitly report output tokens
+            },
         )
+
+        # Log the token counts and cost for verification
+        print(f"Input tokens: {input_tokens}")
+        print(f"Output tokens: {output_tokens}")
+        print(f"Total tokens: {input_tokens + output_tokens}")
+        print(f"Total cost: ${total_cost:.6f}")
 
         return body
