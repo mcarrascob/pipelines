@@ -1,6 +1,8 @@
-from typing import List, Optional
+from typing import List, Optional, Dict
 import os
 import tiktoken
+from collections import defaultdict
+from datetime import datetime, timedelta
 
 from pydantic import BaseModel
 from langfuse import Langfuse
@@ -28,6 +30,8 @@ class Pipeline:
         self.langfuse = None
         self.chat_generations = {}
         self.tokenizer = tiktoken.get_encoding("cl100k_base")
+        self.global_usage = defaultdict(lambda: {"input_tokens": 0, "output_tokens": 0, "cost": 0.0})
+        self.last_report_time = datetime.now()
 
     async def on_startup(self):
         print(f"on_startup:{__name__}")
@@ -70,6 +74,23 @@ class Pipeline:
         input_cost = (input_tokens / 1000) * pricing[model]["input"]
         output_cost = (output_tokens / 1000) * pricing[model]["output"]
         return input_cost + output_cost
+
+    def update_global_usage(self, model: str, input_tokens: int, output_tokens: int, cost: float):
+        self.global_usage[model]["input_tokens"] += input_tokens
+        self.global_usage[model]["output_tokens"] += output_tokens
+        self.global_usage[model]["cost"] += cost
+
+    def report_global_usage(self):
+        current_time = datetime.now()
+        if current_time - self.last_report_time >= timedelta(hours=1):
+            print("\nGlobal Usage Report:")
+            for model, usage in self.global_usage.items():
+                print(f"Model: {model}")
+                print(f"  Total Input Tokens: {usage['input_tokens']}")
+                print(f"  Total Output Tokens: {usage['output_tokens']}")
+                print(f"  Total Cost: ${usage['cost']:.6f}")
+            print("\n")
+            self.last_report_time = current_time
 
     async def inlet(self, body: dict, user: Optional[dict] = None) -> dict:
         print(f"inlet:{__name__}")
@@ -114,6 +135,9 @@ class Pipeline:
 
         total_cost = self.calculate_cost(input_tokens, output_tokens, body["model"])
 
+        # Update global usage
+        self.update_global_usage(body["model"], input_tokens, output_tokens, total_cost)
+
         generation.end(
             output=body["messages"][-1]["content"],  # Assuming the last message is the generated one
             usage={
@@ -125,7 +149,7 @@ class Pipeline:
             metadata={
                 "interface": "open-webui",
                 "output_tokens": output_tokens,
-                "model": body["model"],  # Include the model name in metadata
+                "model": body["model"],
             },
         )
 
@@ -135,5 +159,8 @@ class Pipeline:
         print(f"Output tokens: {output_tokens}")
         print(f"Total tokens: {all_tokens}")
         print(f"Total cost: ${total_cost:.6f}")
+
+        # Report global usage periodically
+        self.report_global_usage()
 
         return body
