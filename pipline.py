@@ -2,7 +2,6 @@ from typing import List, Optional
 import os
 import tiktoken
 
-from utils.pipelines.main import get_last_user_message, get_last_assistant_message
 from pydantic import BaseModel
 from langfuse import Langfuse
 from langfuse.api.resources.commons.errors.unauthorized_error import UnauthorizedError
@@ -55,8 +54,8 @@ class Pipeline:
         except Exception as e:
             print(f"Langfuse error: {e} Please re-enter your Langfuse credentials in the pipeline settings.")
 
-    def count_tokens(self, text: str) -> int:
-        return len(self.tokenizer.encode(text))
+    def count_tokens(self, messages: List[dict]) -> int:
+        return sum(len(self.tokenizer.encode(msg["content"])) for msg in messages)
 
     def calculate_cost(self, input_tokens: int, output_tokens: int, model: str) -> float:
         pricing = {
@@ -65,7 +64,8 @@ class Pipeline:
         }
         
         if model not in pricing:
-            raise ValueError(f"Unknown model: {model}. Please add pricing information for this model.")
+            print(f"Warning: Unknown model '{model}'. Cost set to 0.")
+            return 0.0
         
         input_cost = (input_tokens / 1000) * pricing[model]["input"]
         output_cost = (output_tokens / 1000) * pricing[model]["output"]
@@ -82,8 +82,7 @@ class Pipeline:
             session_id=body["chat_id"],
         )
 
-        input_text = " ".join([msg["content"] for msg in body["messages"]])
-        input_tokens = self.count_tokens(input_text)
+        input_tokens = self.count_tokens(body["messages"])
 
         generation = trace.generation(
             name=body["chat_id"],
@@ -92,7 +91,10 @@ class Pipeline:
             metadata={"interface": "open-webui", "input_tokens": input_tokens},
         )
 
-        self.chat_generations[body["chat_id"]] = generation
+        self.chat_generations[body["chat_id"]] = {
+            "generation": generation,
+            "input_tokens": input_tokens
+        }
         print(trace.get_trace_url())
 
         return body
@@ -102,33 +104,36 @@ class Pipeline:
         if body["chat_id"] not in self.chat_generations:
             return body
 
-        generation = self.chat_generations[body["chat_id"]]
+        generation_data = self.chat_generations[body["chat_id"]]
+        generation = generation_data["generation"]
+        input_tokens = generation_data["input_tokens"]
 
-        user_message = get_last_user_message(body["messages"])
-        generated_message = get_last_assistant_message(body["messages"])
+        # Count tokens for all messages, including the new generated message
+        all_tokens = self.count_tokens(body["messages"])
+        output_tokens = all_tokens - input_tokens
 
-        input_tokens = self.count_tokens(user_message)
-        output_tokens = self.count_tokens(generated_message)
         total_cost = self.calculate_cost(input_tokens, output_tokens, body["model"])
 
         generation.end(
-            output=generated_message,
+            output=body["messages"][-1]["content"],  # Assuming the last message is the generated one
             usage={
                 "prompt_tokens": input_tokens,
                 "completion_tokens": output_tokens,
-                "total_tokens": input_tokens + output_tokens,
+                "total_tokens": all_tokens,
                 "total_cost": total_cost,
             },
             metadata={
                 "interface": "open-webui",
-                "output_tokens": output_tokens,  # Explicitly report output tokens
+                "output_tokens": output_tokens,
+                "model": body["model"],  # Include the model name in metadata
             },
         )
 
-        # Log the token counts and cost for verification
+        # Log the token counts, cost, and model for verification
+        print(f"Model: {body['model']}")
         print(f"Input tokens: {input_tokens}")
         print(f"Output tokens: {output_tokens}")
-        print(f"Total tokens: {input_tokens + output_tokens}")
+        print(f"Total tokens: {all_tokens}")
         print(f"Total cost: ${total_cost:.6f}")
 
         return body
