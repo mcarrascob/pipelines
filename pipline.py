@@ -29,7 +29,7 @@ class Pipeline:
         )
         self.langfuse = None
         self.chat_generations = {}
-        self.tokenizer = tiktoken.encoding_for_model("o200k_base")
+        self.tokenizer = tiktoken.get_encoding("o200k_base")
         self.global_usage = defaultdict(lambda: {"input_tokens": 0, "output_tokens": 0, "cost": 0.0})
         self.last_report_time = datetime.now()
 
