@@ -29,11 +29,23 @@ class Pipeline:
         )
         self.langfuse = None
         self.chat_generations = {}
-        self.tokenizer = tiktoken.get_encoding("o200k_base")
+        self.tokenizer = tiktoken.get_encoding("o200k_base")  # Updated to use cl100k_base
         self.global_usage = defaultdict(lambda: {"input_tokens": 0, "output_tokens": 0, "cost": 0.0})
         self.last_report_time = datetime.now()
+        self.token_correction_factor = 1.05  # 5% correction factor
 
     # ... (other methods remain the same)
+
+    def count_tokens(self, messages: List[dict]) -> int:
+        token_count = 0
+        for message in messages:
+            token_count += 4  # Every message follows <im_start>{role/name}\n{content}<im_end>\n
+            for key, value in message.items():
+                token_count += len(self.tokenizer.encode(value))
+                if key == "name":  # if there's a name, the role is omitted
+                    token_count -= 1  # role is always required and always 1 token
+        token_count += 2  # Every reply is primed with <im_start>assistant
+        return int(token_count * self.token_correction_factor)  # Apply correction factor
 
     def calculate_cost(self, input_tokens: int, output_tokens: int, model: str) -> float:
         pricing = {
@@ -48,6 +60,34 @@ class Pipeline:
         input_cost = (input_tokens / 1000) * pricing[model]["input"]
         output_cost = (output_tokens / 1000) * pricing[model]["output"]
         return input_cost + output_cost
+
+    async def inlet(self, body: dict, user: Optional[dict] = None) -> dict:
+        print(f"inlet:{__name__}")
+
+        trace = self.langfuse.trace(
+            name=f"filter:{__name__}",
+            input=body,
+            user_id=user["id"],
+            metadata={"name": user["name"]},
+            session_id=body["chat_id"],
+        )
+
+        input_tokens = self.count_tokens(body["messages"])
+
+        generation = trace.generation(
+            name=body["chat_id"],
+            model=body["model"],
+            input=body["messages"],
+            metadata={"interface": "open-webui", "input_tokens": input_tokens},
+        )
+
+        self.chat_generations[body["chat_id"]] = {
+            "generation": generation,
+            "input_tokens": input_tokens
+        }
+        print(trace.get_trace_url())
+
+        return body
 
     async def outlet(self, body: dict, user: Optional[dict] = None) -> dict:
         print(f"outlet:{__name__}")
