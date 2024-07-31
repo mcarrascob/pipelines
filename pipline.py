@@ -32,7 +32,6 @@ class Pipeline:
         self.tokenizer = tiktoken.get_encoding("o200k_base")
         self.global_usage = defaultdict(lambda: {"input_tokens": 0, "output_tokens": 0, "cost": 0.0})
         self.last_report_time = datetime.now()
-        self.token_correction_factor = 1.05  # 5% correction factor
 
     async def on_startup(self):
         print(f"on_startup:{__name__}")
