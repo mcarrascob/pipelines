@@ -60,15 +60,7 @@ class Pipeline:
             print(f"Langfuse error: {e} Please re-enter your Langfuse credentials in the pipeline settings.")
 
     def count_tokens(self, messages: List[dict]) -> int:
-        token_count = 0
-        for message in messages:
-            token_count += 4  # Every message follows <im_start>{role/name}\n{content}<im_end>\n
-            for key, value in message.items():
-                token_count += len(self.tokenizer.encode(value))
-                if key == "name":  # if there's a name, the role is omitted
-                    token_count -= 1  # role is always required and always 1 token
-        token_count += 2  # Every reply is primed with <im_start>assistant
-        return int(token_count * self.token_correction_factor)  # Apply correction factor
+        return sum(len(self.tokenizer.encode(msg["content"])) for msg in messages)
 
     def calculate_cost(self, input_tokens: int, output_tokens: int, model: str) -> float:
         pricing = {
