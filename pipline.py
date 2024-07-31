@@ -34,7 +34,31 @@ class Pipeline:
         self.last_report_time = datetime.now()
         self.token_correction_factor = 1.05  # 5% correction factor
 
-    # ... (other methods remain the same)
+    async def on_startup(self):
+        print(f"on_startup:{__name__}")
+        self.set_langfuse()
+
+    async def on_shutdown(self):
+        print(f"on_shutdown:{__name__}")
+        self.langfuse.flush()
+
+    async def on_valves_updated(self):
+        self.set_langfuse()
+
+    def set_langfuse(self):
+        try:
+            self.langfuse = Langfuse(
+                secret_key=self.valves.secret_key,
+                public_key=self.valves.public_key,
+                host=self.valves.host,
+                debug=False,
+            )
+            self.langfuse.auth_check()
+        except UnauthorizedError:
+            print("Langfuse credentials incorrect. Please re-enter your Langfuse credentials in the pipeline settings.")
+        except Exception as e:
+            print(f"Langfuse error: {e} Please re-enter your Langfuse credentials in the pipeline settings.")
+
 
     def count_tokens(self, messages: List[dict]) -> int:
         token_count = 0
