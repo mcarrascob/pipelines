@@ -136,7 +136,7 @@ class Pipeline:
         input_tokens = generation_data["input_tokens"]
         
         # Get the API response content
-        api_response = body.get("choices", [{}])[0].get("message", {}).get("content", "")
+        api_response = body["messages"][-1]["content"] if body["messages"] else ""
         
         try:
             # Calculate tokens for the API response only
