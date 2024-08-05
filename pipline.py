@@ -31,7 +31,7 @@ class Pipeline:
         )
         self.langfuse = None
         self.chat_generations = {}
-        self.tokenizer = tiktoken.get_encoding("cl100k_base")  # Use the appropriate tokenizer for your model
+        self.tokenizers = {}
 
     async def on_startup(self):
         print(f"on_startup:{__name__}")
@@ -60,13 +60,23 @@ class Pipeline:
         except Exception as e:
             print(f"Langfuse error: {e} Please re-enter your Langfuse credentials in the pipeline settings.")
 
-    def count_tokens(self, messages: List[dict]) -> int:
+    def get_tokenizer(self, model: str):
+        if model not in self.tokenizers:
+            try:
+                self.tokenizers[model] = tiktoken.encoding_for_model(model)
+            except KeyError:
+                print(f"Warning: Model {model} not found. Using default tokenizer.")
+                self.tokenizers[model] = tiktoken.get_encoding("cl100k_base")
+        return self.tokenizers[model]
+
+    def count_tokens(self, messages: List[dict], model: str) -> int:
         """Count tokens for a list of messages."""
+        tokenizer = self.get_tokenizer(model)
         token_count = 0
         for message in messages:
             token_count += 4  # Every message follows <im_start>{role/name}\n{content}<im_end>\n
             for key, value in message.items():
-                token_count += len(self.tokenizer.encode(str(value)))
+                token_count += len(tokenizer.encode(str(value)))
             if "name" in message:  # If there's a name, the role is omitted
                 token_count -= 1  # Role is always required and always 1 token
         token_count += 2  # Every reply is primed with <im_start>assistant
@@ -99,7 +109,7 @@ class Pipeline:
         )
 
         # Calculate input tokens for all messages
-        input_tokens = self.count_tokens(body["messages"])
+        input_tokens = self.count_tokens(body["messages"], body["model"])
 
         generation = trace.generation(
             name=body["chat_id"],
@@ -108,7 +118,7 @@ class Pipeline:
             metadata={"interface": "open-webui", "input_tokens": input_tokens},
         )
 
-        self.chat_generations[body["chat_id"]] = {"generation": generation, "input_tokens": input_tokens}
+        self.chat_generations[body["chat_id"]] = {"generation": generation, "input_tokens": input_tokens, "model": body["model"]}
         print(f"Calculated input tokens: {input_tokens}")
         print(trace.get_trace_url())
 
@@ -122,6 +132,7 @@ class Pipeline:
         generation_data = self.chat_generations[body["chat_id"]]
         generation = generation_data["generation"]
         fallback_input_tokens = generation_data["input_tokens"]
+        model = generation_data["model"]
 
         generated_message = get_last_assistant_message(body["messages"])
 
@@ -136,7 +147,7 @@ class Pipeline:
             prompt_tokens = fallback_input_tokens
             print("Using fallback method for prompt tokens")
         if completion_tokens is None:
-            completion_tokens = self.count_tokens([{"role": "assistant", "content": generated_message}])
+            completion_tokens = self.count_tokens([{"role": "assistant", "content": generated_message}], model)
             print("Using fallback method for completion tokens")
         if total_tokens is None:
             total_tokens = prompt_tokens + completion_tokens
@@ -153,6 +164,7 @@ class Pipeline:
         )
 
         # Print token information for verification
+        print(f"Model: {model}")
         print(f"API prompt tokens: {api_usage.get('prompt_tokens', 'Not provided')}")
         print(f"API completion tokens: {api_usage.get('completion_tokens', 'Not provided')}")
         print(f"API total tokens: {api_usage.get('total_tokens', 'Not provided')}")
