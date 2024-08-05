@@ -105,6 +105,7 @@ class Pipeline:
 
         try:
             input_tokens = sum(self.count_tokens(msg["content"]) for msg in body["messages"])
+            print(f"Input tokens: {input_tokens}")
         except Exception as e:
             print(f"Error counting input tokens: {e}")
             print(f"Message content: {body['messages']}")
@@ -140,6 +141,8 @@ class Pipeline:
         try:
             # Calculate tokens for the API response only
             output_tokens = self.count_tokens(api_response)
+            print(f"API response token count: {output_tokens}")
+            print(f"API response content: {api_response}")
         except Exception as e:
             print(f"Error counting output tokens: {e}")
             print(f"API response content: {api_response}")
@@ -150,10 +153,12 @@ class Pipeline:
             model_input_tokens = body["usage"].get("prompt_tokens", input_tokens)
             model_output_tokens = body["usage"].get("completion_tokens", output_tokens)
             total_tokens = body["usage"].get("total_tokens", input_tokens + output_tokens)
+            print(f"Model-provided token counts - Input: {model_input_tokens}, Output: {model_output_tokens}, Total: {total_tokens}")
         else:
             model_input_tokens = input_tokens
             model_output_tokens = output_tokens
             total_tokens = input_tokens + output_tokens
+            print(f"Calculated token counts - Input: {model_input_tokens}, Output: {model_output_tokens}, Total: {total_tokens}")
 
         total_cost = self.calculate_cost(model_input_tokens, model_output_tokens, body["model"])
 
