@@ -65,6 +65,7 @@ class Pipeline:
         pricing = {
             "gpt-4": {"input": 0.03, "output": 0.06},
             "gpt-3.5-turbo": {"input": 0.0015, "output": 0.002},
+            "gpt-4o": {"input": 0.03, "output": 0.06},  # Assuming gpt-4o pricing is same as gpt-4
         }
         
         if model not in pricing:
@@ -103,12 +104,15 @@ class Pipeline:
 
         input_tokens = sum(self.count_tokens(msg["content"]) for msg in body["messages"])
 
-        generation = trace.generation_start(
+        generation = trace.generation(
             name=body["chat_id"],
             model=body["model"],
-            model_parameters=body.get("model_parameters", {}),
             input=body["messages"],
-            metadata={"interface": "open-webui", "input_tokens": input_tokens},
+            metadata={
+                "interface": "open-webui",
+                "input_tokens": input_tokens,
+                "model_parameters": body.get("model_parameters", {}),
+            },
         )
 
         self.chat_generations[body["chat_id"]] = {
@@ -140,10 +144,10 @@ class Pipeline:
             output=generated_message,
             prompt_tokens=input_tokens,
             completion_tokens=output_tokens,
+            total_tokens=total_tokens,
             metadata={
                 "interface": "open-webui",
                 "model": body["model"],
-                "total_tokens": total_tokens,
                 "total_cost": total_cost,
             },
         )
