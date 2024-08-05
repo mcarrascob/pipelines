@@ -9,6 +9,7 @@ from pydantic import BaseModel
 from langfuse import Langfuse
 from langfuse.api.resources.commons.errors.unauthorized_error import UnauthorizedError
 
+
 class Pipeline:
     class Valves(BaseModel):
         pipelines: List[str] = []
@@ -30,7 +31,7 @@ class Pipeline:
         )
         self.langfuse = None
         self.chat_generations = {}
-        self.tokenizer = tiktoken.get_encoding("cl100k_base")
+        self.tokenizer = tiktoken.get_encoding("cl100k_base")  # Default to GPT-4 encoding
 
     async def on_startup(self):
         print(f"on_startup:{__name__}")
@@ -38,8 +39,7 @@ class Pipeline:
 
     async def on_shutdown(self):
         print(f"on_shutdown:{__name__}")
-        if self.langfuse:
-            self.langfuse.flush()
+        self.langfuse.flush()
 
     async def on_valves_updated(self):
         self.set_langfuse()
@@ -54,27 +54,14 @@ class Pipeline:
             )
             self.langfuse.auth_check()
         except UnauthorizedError:
-            print("Langfuse credentials incorrect. Please re-enter your Langfuse credentials in the pipeline settings.")
+            print(
+                "Langfuse credentials incorrect. Please re-enter your Langfuse credentials in the pipeline settings."
+            )
         except Exception as e:
             print(f"Langfuse error: {e} Please re-enter your Langfuse credentials in the pipeline settings.")
 
     def count_tokens(self, text: str) -> int:
         return len(self.tokenizer.encode(text))
-
-    def calculate_cost(self, input_tokens: int, output_tokens: int, model: str) -> float:
-        pricing = {
-            "gpt-4": {"input": 0.03, "output": 0.06},
-            "gpt-3.5-turbo": {"input": 0.0015, "output": 0.002},
-            "gpt-4o": {"input": 0.03, "output": 0.06},  # Assuming gpt-4o pricing is same as gpt-4
-        }
-        
-        if model not in pricing:
-            print(f"Warning: Unknown model '{model}'. Cost set to 0.")
-            return 0.0
-        
-        input_cost = (input_tokens / 1000) * pricing[model]["input"]
-        output_cost = (output_tokens / 1000) * pricing[model]["output"]
-        return input_cost + output_cost
 
     async def inlet(self, body: dict, user: Optional[dict] = None) -> dict:
         print(f"inlet:{__name__}")
@@ -97,29 +84,20 @@ class Pipeline:
         trace = self.langfuse.trace(
             name=f"filter:{__name__}",
             input=body,
-            user_id=user["id"] if user else None,
-            metadata={"name": user["name"] if user else None},
+            user_id=user["id"],
+            metadata={"name": user["name"]},
             session_id=body["chat_id"],
         )
-
-        input_tokens = sum(self.count_tokens(msg["content"]) for msg in body["messages"])
 
         generation = trace.generation(
             name=body["chat_id"],
             model=body["model"],
             input=body["messages"],
-            metadata={
-                "interface": "open-webui",
-                "input_tokens": input_tokens,
-                "model_parameters": body.get("model_parameters", {}),
-            },
+            metadata={"interface": "open-webui"},
         )
 
-        self.chat_generations[body["chat_id"]] = {
-            "generation": generation,
-            "input_tokens": input_tokens,
-        }
-        print(f"Trace URL: {trace.get_trace_url()}")
+        self.chat_generations[body["chat_id"]] = generation
+        print(trace.get_trace_url())
 
         return body
 
@@ -128,31 +106,22 @@ class Pipeline:
         if body["chat_id"] not in self.chat_generations:
             return body
 
-        generation_data = self.chat_generations[body["chat_id"]]
-        generation = generation_data["generation"]
-        input_tokens = generation_data["input_tokens"]
+        generation = self.chat_generations[body["chat_id"]]
 
         user_message = get_last_user_message(body["messages"])
         generated_message = get_last_assistant_message(body["messages"])
 
-        output_tokens = self.count_tokens(generated_message)
-        total_tokens = input_tokens + output_tokens
-
-        total_cost = self.calculate_cost(input_tokens, output_tokens, body["model"])
+        user_tokens = self.count_tokens(user_message)
+        generated_tokens = self.count_tokens(generated_message)
 
         generation.end(
             output=generated_message,
-            prompt_tokens=input_tokens,
-            completion_tokens=output_tokens,
-            total_tokens=total_tokens,
-            metadata={
-                "interface": "open-webui",
-                "model": body["model"],
-                "total_cost": total_cost,
+            usage={
+                "prompt_tokens": user_tokens,
+                "completion_tokens": generated_tokens,
+                "total_tokens": user_tokens + generated_tokens,
             },
+            metadata={"interface": "open-webui"},
         )
-
-        # Clean up the stored data for this chat
-        del self.chat_generations[body["chat_id"]]
 
         return body
