@@ -29,7 +29,7 @@ class Pipeline:
         )
         self.langfuse = None
         self.chat_generations = {}
-        self.tokenizer = tiktoken.get_encoding("o200k_base")
+        self.tokenizer = tiktoken.encoding_for_model("gpt-4")  # Use GPT-4 tokenizer for more accurate counts
         self.global_usage = defaultdict(lambda: {"input_tokens": 0, "output_tokens": 0, "cost": 0.0})
         self.last_report_time = datetime.now()
 
@@ -59,12 +59,20 @@ class Pipeline:
             print(f"Langfuse error: {e} Please re-enter your Langfuse credentials in the pipeline settings.")
 
     def count_tokens(self, messages: List[dict]) -> int:
-        return sum(len(self.tokenizer.encode(msg["content"])) for msg in messages)
+        num_tokens = 0
+        for message in messages:
+            num_tokens += 4  # every message follows <im_start>{role/name}\n{content}<im_end>\n
+            for key, value in message.items():
+                num_tokens += len(self.tokenizer.encode(value))
+                if key == "name":  # if there's a name, the role is omitted
+                    num_tokens += -1  # role is always required and always 1 token
+        num_tokens += 2  # every reply is primed with <im_start>assistant
+        return num_tokens
 
     def calculate_cost(self, input_tokens: int, output_tokens: int, model: str) -> float:
         pricing = {
-            "gpt-4o": {"input": 0.005, "output": 0.015},
-            "gpt-4o-mini": {"input": 0.00015, "output": 0.0006},
+            "gpt-4o": {"input": 0.03, "output": 0.06},
+            "gpt-4o-mini": {"input": 0.001, "output": 0.002},
         }
         
         if model not in pricing:
@@ -114,7 +122,8 @@ class Pipeline:
 
         self.chat_generations[body["chat_id"]] = {
             "generation": generation,
-            "input_tokens": input_tokens
+            "input_tokens": input_tokens,
+            "messages": body["messages"]  # Store the input messages
         }
         print(trace.get_trace_url())
 
@@ -128,10 +137,10 @@ class Pipeline:
         generation_data = self.chat_generations[body["chat_id"]]
         generation = generation_data["generation"]
         input_tokens = generation_data["input_tokens"]
+        input_messages = generation_data["messages"]
 
-        # Count tokens for all messages, including the new generated message
-        all_tokens = self.count_tokens(body["messages"])
-        output_tokens = all_tokens - input_tokens
+        # Calculate tokens for the new generated message only
+        output_tokens = self.count_tokens([body["messages"][-1]])
 
         total_cost = self.calculate_cost(input_tokens, output_tokens, body["model"])
 
@@ -143,7 +152,7 @@ class Pipeline:
             usage={
                 "prompt_tokens": input_tokens,
                 "completion_tokens": output_tokens,
-                "total_tokens": all_tokens,
+                "total_tokens": input_tokens + output_tokens,
                 "total_cost": total_cost,
             },
             metadata={
@@ -157,10 +166,13 @@ class Pipeline:
         print(f"Model: {body['model']}")
         print(f"Input tokens: {input_tokens}")
         print(f"Output tokens: {output_tokens}")
-        print(f"Total tokens: {all_tokens}")
+        print(f"Total tokens: {input_tokens + output_tokens}")
         print(f"Total cost: ${total_cost:.6f}")
 
         # Report global usage periodically
         self.report_global_usage()
+
+        # Clean up the stored data for this chat
+        del self.chat_generations[body["chat_id"]]
 
         return body
