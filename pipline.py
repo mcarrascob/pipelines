@@ -3,6 +3,7 @@ from schemas import OpenAIChatMessage
 import os
 import uuid
 import tiktoken
+import json
 
 from utils.pipelines.main import get_last_user_message, get_last_assistant_message
 from pydantic import BaseModel
@@ -82,6 +83,18 @@ class Pipeline:
         token_count += 2  # Every reply is primed with <im_start>assistant
         return token_count
 
+    def count_output_tokens(self, message: str, model: str) -> int:
+        """Count tokens for the output message, accounting for potential JSON structure."""
+        tokenizer = self.get_tokenizer(model)
+        try:
+            # Try to parse the message as JSON
+            parsed_message = json.loads(message)
+            # If successful, count tokens for the entire JSON structure
+            return len(tokenizer.encode(json.dumps(parsed_message)))
+        except json.JSONDecodeError:
+            # If not JSON, count tokens for the raw string
+            return len(tokenizer.encode(message))
+
     async def inlet(self, body: dict, user: Optional[dict] = None) -> dict:
         print(f"inlet:{__name__}")
         print(f"Received body: {body}")
@@ -147,7 +160,7 @@ class Pipeline:
             prompt_tokens = fallback_input_tokens
             print("Using fallback method for prompt tokens")
         if completion_tokens is None:
-            completion_tokens = self.count_tokens([{"role": "assistant", "content": generated_message}], model)
+            completion_tokens = self.count_output_tokens(generated_message, model)
             print("Using fallback method for completion tokens")
         if total_tokens is None:
             total_tokens = prompt_tokens + completion_tokens
