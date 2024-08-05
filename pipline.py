@@ -74,12 +74,9 @@ class Pipeline:
         """Count tokens for a list of messages."""
         tokenizer = self.get_tokenizer(model)
         token_count = 0
-        for i, message in enumerate(messages):
-            if i == 0:
-                token_count += 4  # First message follows <im_start>{role/name}\n{content}<im_end>\n
-            else:
-                token_count += 2  # Subsequent messages follow {role/name}\n{content}
-
+        
+        for message in messages:
+            token_count += 4  # Every message follows <im_start>{role/name}\n{content}<im_end>\n
             for key, value in message.items():
                 token_count += len(tokenizer.encode(str(value)))
             
@@ -87,6 +84,11 @@ class Pipeline:
                 token_count -= 1  # Role is always required and always 1 token
 
         token_count += 2  # Every reply is primed with <im_start>assistant
+        
+        # Adjust for the chain of messages
+        if len(messages) > 1:
+            token_count -= 2 * (len(messages) - 1)  # Subtract 2 for each message after the first
+
         return token_count
 
     def count_output_tokens(self, message: str, model: str) -> int:
