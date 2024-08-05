@@ -142,7 +142,7 @@ class Pipeline:
         self.chat_generations[body["chat_id"]] = {
             "generation": generation,
             "input_tokens": input_tokens,
-            "messages": body["messages"]  # Store the input messages
+            "messages": body["messages"]  # Store all input messages
         }
         print(trace.get_trace_url())
 
@@ -156,41 +156,51 @@ class Pipeline:
         generation_data = self.chat_generations[body["chat_id"]]
         generation = generation_data["generation"]
         input_tokens = generation_data["input_tokens"]
-        input_messages = generation_data["messages"]
-
+        
         try:
-            # Calculate tokens for the new generated message only
-            output_tokens = self.count_tokens([body["messages"][-1]])
+            # Calculate tokens for the entire conversation, including the new message
+            total_tokens = self.count_tokens(body["messages"])
+            # The output tokens are the difference between total and input
+            output_tokens = total_tokens - input_tokens
         except Exception as e:
-            print(f"Error counting output tokens: {e}")
-            print(f"Output message content: {body['messages'][-1]}")
+            print(f"Error counting tokens: {e}")
+            print(f"Message content: {body['messages']}")
             output_tokens = 0  # Set a default value
 
-        total_cost = self.calculate_cost(input_tokens, output_tokens, body["model"])
+        # If the model provides token counts, use those instead
+        if "usage" in body and isinstance(body["usage"], dict):
+            model_input_tokens = body["usage"].get("prompt_tokens", input_tokens)
+            model_output_tokens = body["usage"].get("completion_tokens", output_tokens)
+            total_tokens = body["usage"].get("total_tokens", total_tokens)
+        else:
+            model_input_tokens = input_tokens
+            model_output_tokens = output_tokens
+
+        total_cost = self.calculate_cost(model_input_tokens, model_output_tokens, body["model"])
 
         # Update global usage
-        self.update_global_usage(body["model"], input_tokens, output_tokens, total_cost)
+        self.update_global_usage(body["model"], model_input_tokens, model_output_tokens, total_cost)
 
         generation.end(
             output=body["messages"][-1]["content"],  # Assuming the last message is the generated one
             usage={
-                "prompt_tokens": input_tokens,
-                "completion_tokens": output_tokens,
-                "total_tokens": input_tokens + output_tokens,
+                "prompt_tokens": model_input_tokens,
+                "completion_tokens": model_output_tokens,
+                "total_tokens": total_tokens,
                 "total_cost": total_cost,
             },
             metadata={
                 "interface": "open-webui",
-                "output_tokens": output_tokens,
+                "output_tokens": model_output_tokens,
                 "model": body["model"],
             },
         )
 
         # Log the token counts, cost, and model for verification
         print(f"Model: {body['model']}")
-        print(f"Input tokens: {input_tokens}")
-        print(f"Output tokens: {output_tokens}")
-        print(f"Total tokens: {input_tokens + output_tokens}")
+        print(f"Input tokens: {model_input_tokens}")
+        print(f"Output tokens: {model_output_tokens}")
+        print(f"Total tokens: {total_tokens}")
         print(f"Total cost: ${total_cost:.6f}")
 
         # Report global usage periodically
