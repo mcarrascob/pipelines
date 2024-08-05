@@ -66,7 +66,14 @@ class Pipeline:
         for message in messages:
             token_count += 4  # Every message follows <im_start>{role/name}\n{content}<im_end>\n
             for key, value in message.items():
-                token_count += len(self.tokenizer.encode(value))
+                if isinstance(value, str):
+                    token_count += len(self.tokenizer.encode(value))
+                elif isinstance(value, (int, float)):
+                    token_count += len(self.tokenizer.encode(str(value)))
+                elif value is None:
+                    continue
+                else:
+                    token_count += len(self.tokenizer.encode(str(value)))
                 if key == "name":  # If there's a name, the role is omitted
                     token_count -= 1  # Role is always required and always 1 token
         token_count += 2  # Every reply is primed with <im_start>assistant
