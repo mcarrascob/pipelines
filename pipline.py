@@ -63,7 +63,21 @@ class Pipeline:
         for message in messages:
             num_tokens += 4  # every message follows <im_start>{role/name}\n{content}<im_end>\n
             for key, value in message.items():
-                num_tokens += len(self.tokenizer.encode(value))
+                if isinstance(value, str):
+                    num_tokens += len(self.tokenizer.encode(value))
+                elif isinstance(value, (int, float)):
+                    num_tokens += len(self.tokenizer.encode(str(value)))
+                elif isinstance(value, bool):
+                    num_tokens += 1  # 'true' or 'false'
+                elif isinstance(value, (list, dict)):
+                    # For complex types, we'll use a simple estimation
+                    num_tokens += len(self.tokenizer.encode(str(value)))
+                elif value is None:
+                    num_tokens += 1  # 'null'
+                else:
+                    print(f"Warning: Unexpected type {type(value)} for key {key}")
+                    num_tokens += 1  # Add a token as a precaution
+                
                 if key == "name":  # if there's a name, the role is omitted
                     num_tokens += -1  # role is always required and always 1 token
         num_tokens += 2  # every reply is primed with <im_start>assistant
@@ -111,7 +125,12 @@ class Pipeline:
             session_id=body["chat_id"],
         )
 
-        input_tokens = self.count_tokens(body["messages"])
+        try:
+            input_tokens = self.count_tokens(body["messages"])
+        except Exception as e:
+            print(f"Error counting tokens: {e}")
+            print(f"Message content: {body['messages']}")
+            input_tokens = 0  # Set a default value
 
         generation = trace.generation(
             name=body["chat_id"],
@@ -139,8 +158,13 @@ class Pipeline:
         input_tokens = generation_data["input_tokens"]
         input_messages = generation_data["messages"]
 
-        # Calculate tokens for the new generated message only
-        output_tokens = self.count_tokens([body["messages"][-1]])
+        try:
+            # Calculate tokens for the new generated message only
+            output_tokens = self.count_tokens([body["messages"][-1]])
+        except Exception as e:
+            print(f"Error counting output tokens: {e}")
+            print(f"Output message content: {body['messages'][-1]}")
+            output_tokens = 0  # Set a default value
 
         total_cost = self.calculate_cost(input_tokens, output_tokens, body["model"])
 
