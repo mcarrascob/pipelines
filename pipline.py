@@ -29,7 +29,7 @@ class Pipeline:
         )
         self.langfuse = None
         self.chat_generations = {}
-        self.tokenizer = tiktoken.encoding_for_model("gpt-4o")  # Using gpt-4o as per your modification
+        self.tokenizer = tiktoken.encoding_for_model("gpt-4o")
         self.global_usage = defaultdict(lambda: {"input_tokens": 0, "output_tokens": 0, "cost": 0.0})
         self.last_report_time = datetime.now()
 
@@ -58,30 +58,8 @@ class Pipeline:
         except Exception as e:
             print(f"Langfuse error: {e} Please re-enter your Langfuse credentials in the pipeline settings.")
 
-    def count_tokens(self, messages: List[dict]) -> int:
-        num_tokens = 0
-        for message in messages:
-            num_tokens += 4  # every message follows <im_start>{role/name}\n{content}<im_end>\n
-            for key, value in message.items():
-                if isinstance(value, str):
-                    num_tokens += len(self.tokenizer.encode(value))
-                elif isinstance(value, (int, float)):
-                    num_tokens += len(self.tokenizer.encode(str(value)))
-                elif isinstance(value, bool):
-                    num_tokens += 1  # 'true' or 'false'
-                elif isinstance(value, (list, dict)):
-                    # For complex types, we'll use a simple estimation
-                    num_tokens += len(self.tokenizer.encode(str(value)))
-                elif value is None:
-                    num_tokens += 1  # 'null'
-                else:
-                    print(f"Warning: Unexpected type {type(value)} for key {key}")
-                    num_tokens += 1  # Add a token as a precaution
-                
-                if key == "name":  # if there's a name, the role is omitted
-                    num_tokens += -1  # role is always required and always 1 token
-        num_tokens += 2  # every reply is primed with <im_start>assistant
-        return num_tokens
+    def count_tokens(self, text: str) -> int:
+        return len(self.tokenizer.encode(text))
 
     def calculate_cost(self, input_tokens: int, output_tokens: int, model: str) -> float:
         pricing = {
@@ -126,9 +104,9 @@ class Pipeline:
         )
 
         try:
-            input_tokens = self.count_tokens(body["messages"])
+            input_tokens = sum(self.count_tokens(msg["content"]) for msg in body["messages"])
         except Exception as e:
-            print(f"Error counting tokens: {e}")
+            print(f"Error counting input tokens: {e}")
             print(f"Message content: {body['messages']}")
             input_tokens = 0  # Set a default value
 
@@ -142,7 +120,6 @@ class Pipeline:
         self.chat_generations[body["chat_id"]] = {
             "generation": generation,
             "input_tokens": input_tokens,
-            "messages": body["messages"]  # Store all input messages
         }
         print(trace.get_trace_url())
 
@@ -158,11 +135,11 @@ class Pipeline:
         input_tokens = generation_data["input_tokens"]
         
         try:
-            # Calculate tokens for the new message only
-            output_tokens = self.count_tokens([body["messages"][-1]])
+            # Calculate tokens for the API response only
+            output_tokens = self.count_tokens(body["messages"][-1]["content"])
         except Exception as e:
-            print(f"Error counting tokens: {e}")
-            print(f"Message content: {body['messages'][-1]}")
+            print(f"Error counting output tokens: {e}")
+            print(f"API response content: {body['messages'][-1]['content']}")
             output_tokens = 0  # Set a default value
 
         # If the model provides token counts, use those instead
@@ -181,7 +158,7 @@ class Pipeline:
         self.update_global_usage(body["model"], model_input_tokens, model_output_tokens, total_cost)
 
         generation.end(
-            output=body["messages"][-1]["content"],  # Assuming the last message is the generated one
+            output=body["messages"][-1]["content"],  # The API response
             usage={
                 "prompt_tokens": model_input_tokens,
                 "completion_tokens": model_output_tokens,
