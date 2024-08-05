@@ -29,7 +29,7 @@ class Pipeline:
         )
         self.langfuse = None
         self.chat_generations = {}
-        self.tokenizer = tiktoken.encoding_for_model("gpt-4")  # Use GPT-4 tokenizer for more accurate counts
+        self.tokenizer = tiktoken.encoding_for_model("gpt-4o")  # Use GPT-4o tokenizer for more accurate counts
         self.global_usage = defaultdict(lambda: {"input_tokens": 0, "output_tokens": 0, "cost": 0.0})
         self.last_report_time = datetime.now()
 
