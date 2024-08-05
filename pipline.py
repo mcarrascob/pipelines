@@ -31,7 +31,7 @@ class Pipeline:
         )
         self.langfuse = None
         self.chat_generations = {}
-        self.tokenizer = tiktoken.get_encoding("o200k_base")  # Use the appropriate tokenizer for your model
+        self.tokenizer = tiktoken.get_encoding("cl100k_base")  # Use the appropriate tokenizer for your model
 
     async def on_startup(self):
         print(f"on_startup:{__name__}")
