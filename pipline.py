@@ -2,6 +2,7 @@ from typing import List, Optional
 from schemas import OpenAIChatMessage
 import os
 import uuid
+import tiktoken
 
 from utils.pipelines.main import get_last_user_message, get_last_assistant_message
 from pydantic import BaseModel
@@ -30,6 +31,7 @@ class Pipeline:
         )
         self.langfuse = None
         self.chat_generations = {}
+        self.tokenizer = tiktoken.get_encoding("cl100k_base")  # Use the appropriate tokenizer for your model
 
     async def on_startup(self):
         print(f"on_startup:{__name__}")
@@ -58,6 +60,9 @@ class Pipeline:
         except Exception as e:
             print(f"Langfuse error: {e} Please re-enter your Langfuse credentials in the pipeline settings.")
 
+    def count_tokens(self, text: str) -> int:
+        return len(self.tokenizer.encode(text))
+
     async def inlet(self, body: dict, user: Optional[dict] = None) -> dict:
         print(f"inlet:{__name__}")
         print(f"Received body: {body}")
@@ -84,8 +89,8 @@ class Pipeline:
             session_id=body["chat_id"],
         )
 
-        # Calculate input tokens
-        input_tokens = sum(len(msg.get("content", "")) for msg in body["messages"])
+        # Calculate input tokens (as a fallback)
+        input_tokens = sum(self.count_tokens(msg.get("content", "")) for msg in body["messages"])
 
         generation = trace.generation(
             name=body["chat_id"],
@@ -106,30 +111,43 @@ class Pipeline:
 
         generation_data = self.chat_generations[body["chat_id"]]
         generation = generation_data["generation"]
-        input_tokens = generation_data["input_tokens"]
+        fallback_input_tokens = generation_data["input_tokens"]
 
-        user_message = get_last_user_message(body["messages"])
         generated_message = get_last_assistant_message(body["messages"])
 
-        # Calculate output tokens
-        output_tokens = len(generated_message)
+        # Try to get token counts from API response
+        api_usage = body.get("usage", {})
+        prompt_tokens = api_usage.get("prompt_tokens")
+        completion_tokens = api_usage.get("completion_tokens")
+        total_tokens = api_usage.get("total_tokens")
 
-        # Calculate total tokens
-        total_tokens = input_tokens + output_tokens
+        # If API doesn't provide token counts, use our own counting method
+        if prompt_tokens is None:
+            prompt_tokens = fallback_input_tokens
+            print("Using fallback method for prompt tokens")
+        if completion_tokens is None:
+            completion_tokens = self.count_tokens(generated_message)
+            print("Using fallback method for completion tokens")
+        if total_tokens is None:
+            total_tokens = prompt_tokens + completion_tokens
+            print("Using fallback method for total tokens")
 
         generation.end(
             output=generated_message,
             usage={
-                "prompt_tokens": input_tokens,
-                "completion_tokens": output_tokens,
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
                 "total_tokens": total_tokens,
             },
             metadata={"interface": "open-webui"},
         )
 
         # Print token information for verification
-        print(f"Input tokens: {input_tokens}")
-        print(f"Output tokens: {output_tokens}")
-        print(f"Total tokens: {total_tokens}")
+        print(f"API prompt tokens: {api_usage.get('prompt_tokens', 'Not provided')}")
+        print(f"API completion tokens: {api_usage.get('completion_tokens', 'Not provided')}")
+        print(f"API total tokens: {api_usage.get('total_tokens', 'Not provided')}")
+        print(f"Reported prompt tokens: {prompt_tokens}")
+        print(f"Reported completion tokens: {completion_tokens}")
+        print(f"Reported total tokens: {total_tokens}")
 
         return body
