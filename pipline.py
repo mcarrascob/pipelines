@@ -134,36 +134,30 @@ class Pipeline:
         generation_data = self.chat_generations[body["chat_id"]]
         generation = generation_data["generation"]
         input_tokens = generation_data["input_tokens"]
-        
-        # Get the API response content
-        api_response = body["messages"][-1]["content"] if body["messages"] else ""
-        
-        try:
-            # Calculate tokens for the API response only
-            output_tokens = self.count_tokens(api_response)
-            print(f"API response token count: {output_tokens}")
-            print(f"API response content: {api_response}")
-        except Exception as e:
-            print(f"Error counting output tokens: {e}")
-            print(f"API response content: {api_response}")
-            output_tokens = 0  # Set a default value
 
-        # If the model provides token counts, use those instead
-        if "usage" in body and isinstance(body["usage"], dict):
-            model_input_tokens = body["usage"].get("prompt_tokens", input_tokens)
-            model_output_tokens = body["usage"].get("completion_tokens", output_tokens)
-            total_tokens = body["usage"].get("total_tokens", input_tokens + output_tokens)
-            print(f"Model-provided token counts - Input: {model_input_tokens}, Output: {model_output_tokens}, Total: {total_tokens}")
-        else:
-            model_input_tokens = input_tokens
-            model_output_tokens = output_tokens
-            total_tokens = input_tokens + output_tokens
-            print(f"Calculated token counts - Input: {model_input_tokens}, Output: {model_output_tokens}, Total: {total_tokens}")
+        # Extract all relevant data from the API response
+        api_response = body["choices"][0]["message"]["content"]
+        finish_reason = body["choices"][0]["finish_reason"]
+        model = body["model"]
+        created = body["created"]
+        response_id = body["id"]
 
-        total_cost = self.calculate_cost(model_input_tokens, model_output_tokens, body["model"])
+        usage = body["usage"]
+        model_input_tokens = usage["prompt_tokens"]
+        model_output_tokens = usage["completion_tokens"]
+        total_tokens = usage["total_tokens"]
+
+        print(f"API response content: {api_response}")
+        print(f"Finish reason: {finish_reason}")
+        print(f"Model: {model}")
+        print(f"Created: {created}")
+        print(f"Response ID: {response_id}")
+        print(f"Model-provided token counts - Input: {model_input_tokens}, Output: {model_output_tokens}, Total: {total_tokens}")
+
+        total_cost = self.calculate_cost(model_input_tokens, model_output_tokens, model)
 
         # Update global usage
-        self.update_global_usage(body["model"], model_input_tokens, model_output_tokens, total_cost)
+        self.update_global_usage(model, model_input_tokens, model_output_tokens, total_cost)
 
         generation.end(
             output=api_response,
@@ -176,12 +170,14 @@ class Pipeline:
             metadata={
                 "interface": "open-webui",
                 "output_tokens": model_output_tokens,
-                "model": body["model"],
+                "model": model,
+                "finish_reason": finish_reason,
+                "created": created,
+                "response_id": response_id,
             },
         )
 
         # Log the token counts, cost, and model for verification
-        print(f"Model: {body['model']}")
         print(f"Input tokens: {model_input_tokens}")
         print(f"Output tokens: {model_output_tokens}")
         print(f"Total tokens: {total_tokens}")
