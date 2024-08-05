@@ -1,6 +1,7 @@
 from typing import List, Optional
 import os
 import uuid
+import json
 
 from utils.pipelines.main import get_last_assistant_message
 from pydantic import BaseModel
@@ -78,8 +79,8 @@ class Pipeline:
         trace = self.langfuse.trace(
             name=f"filter:{__name__}",
             input=body,
-            user_id=user["id"],
-            metadata={"name": user["name"]},
+            user_id=user["id"] if user else None,
+            metadata={"name": user["name"] if user else None},
             session_id=body["chat_id"],
         )
 
@@ -102,10 +103,23 @@ class Pipeline:
 
         generation = self.chat_generations[body["chat_id"]]
 
-        generated_message = get_last_assistant_message(body["messages"])
+        # Parse the response if it's a string
+        if isinstance(body.get("response"), str):
+            try:
+                response = json.loads(body["response"])
+            except json.JSONDecodeError:
+                print("Error: Unable to parse response as JSON")
+                response = {}
+        else:
+            response = body.get("response", {})
+
+        # Extract the generated message
+        generated_message = response.get("choices", [{}])[0].get("message", {}).get("content", "")
+        if not generated_message:
+            generated_message = get_last_assistant_message(body.get("messages", []))
 
         # Extract token usage from the API response
-        usage = body.get("usage", {})
+        usage = response.get("usage", {})
         prompt_tokens = usage.get("prompt_tokens", 0)
         completion_tokens = usage.get("completion_tokens", 0)
         total_tokens = usage.get("total_tokens", 0)
@@ -119,5 +133,8 @@ class Pipeline:
             },
             metadata={"interface": "open-webui"},
         )
+
+        # Print the model's response for visibility
+        print(f"Model response: {generated_message}")
 
         return body
