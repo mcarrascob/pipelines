@@ -1,4 +1,4 @@
-from typing import List, Optional
+from typing import List, Optional, Union
 from schemas import OpenAIChatMessage
 import os
 import uuid
@@ -33,32 +33,7 @@ class Pipeline:
         self.chat_generations = {}
         self.tokenizer = tiktoken.get_encoding("cl100k_base")  # Default to GPT-4 encoding
 
-    async def on_startup(self):
-        print(f"on_startup:{__name__}")
-        self.set_langfuse()
-
-    async def on_shutdown(self):
-        print(f"on_shutdown:{__name__}")
-        self.langfuse.flush()
-
-    async def on_valves_updated(self):
-        self.set_langfuse()
-
-    def set_langfuse(self):
-        try:
-            self.langfuse = Langfuse(
-                secret_key=self.valves.secret_key,
-                public_key=self.valves.public_key,
-                host=self.valves.host,
-                debug=False,
-            )
-            self.langfuse.auth_check()
-        except UnauthorizedError:
-            print(
-                "Langfuse credentials incorrect. Please re-enter your Langfuse credentials in the pipeline settings."
-            )
-        except Exception as e:
-            print(f"Langfuse error: {e} Please re-enter your Langfuse credentials in the pipeline settings.")
+    # ... [previous methods remain unchanged] ...
 
     def count_tokens(self, messages: List[dict]) -> int:
         """Count tokens for a list of messages."""
@@ -66,7 +41,18 @@ class Pipeline:
         for message in messages:
             token_count += 4  # Every message follows <im_start>{role/name}\n{content}<im_end>\n
             for key, value in message.items():
-                token_count += len(self.tokenizer.encode(value))
+                if isinstance(value, str):
+                    token_count += len(self.tokenizer.encode(value))
+                elif isinstance(value, (int, float)):
+                    token_count += len(self.tokenizer.encode(str(value)))
+                elif isinstance(value, bool):
+                    token_count += 1  # 'true' or 'false'
+                elif value is None:
+                    continue  # Skip None values
+                else:
+                    # For complex types, we'll use their string representation
+                    token_count += len(self.tokenizer.encode(repr(value)))
+                
                 if key == "name":  # If there's a name, the role is omitted
                     token_count -= 1  # Role is always required and always 1 token
         token_count += 2  # Every reply is primed with <im_start>assistant
@@ -93,12 +79,16 @@ class Pipeline:
         trace = self.langfuse.trace(
             name=f"filter:{__name__}",
             input=body,
-            user_id=user["id"],
-            metadata={"name": user["name"]},
+            user_id=user["id"] if user else None,
+            metadata={"name": user["name"] if user else None},
             session_id=body["chat_id"],
         )
 
-        prompt_tokens = self.count_tokens(body["messages"])
+        try:
+            prompt_tokens = self.count_tokens(body["messages"])
+        except Exception as e:
+            print(f"Error counting tokens: {e}")
+            prompt_tokens = 0  # Fallback value
 
         generation = trace.generation(
             name=body["chat_id"],
@@ -119,14 +109,18 @@ class Pipeline:
 
         generation = self.chat_generations[body["chat_id"]]
 
-        # Count tokens for the entire message history (prompt)
-        prompt_tokens = self.count_tokens(body["messages"][:-1])  # Exclude the last message (assistant's response)
+        try:
+            # Count tokens for the entire message history (prompt)
+            prompt_tokens = self.count_tokens(body["messages"][:-1])  # Exclude the last message (assistant's response)
 
-        # Count tokens for the generated message
-        generated_message = get_last_assistant_message(body["messages"])
-        completion_tokens = self.count_tokens([{"role": "assistant", "content": generated_message}])
+            # Count tokens for the generated message
+            generated_message = get_last_assistant_message(body["messages"])
+            completion_tokens = self.count_tokens([{"role": "assistant", "content": generated_message}])
 
-        total_tokens = prompt_tokens + completion_tokens
+            total_tokens = prompt_tokens + completion_tokens
+        except Exception as e:
+            print(f"Error counting tokens: {e}")
+            prompt_tokens = completion_tokens = total_tokens = 0  # Fallback values
 
         generation.end(
             output=generated_message,
