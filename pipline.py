@@ -29,7 +29,7 @@ class Pipeline:
         )
         self.langfuse = None
         self.chat_generations = {}
-        self.tokenizer = tiktoken.encoding_for_model("gpt-4o")
+        self.tokenizer = tiktoken.get_encoding("o200k_base")
         self.global_usage = defaultdict(lambda: {"input_tokens": 0, "output_tokens": 0, "cost": 0.0})
         self.last_report_time = datetime.now()
 
@@ -63,16 +63,16 @@ class Pipeline:
 
     def calculate_cost(self, input_tokens: int, output_tokens: int, model: str) -> float:
         pricing = {
-            "gpt-4o": {"input": 0.03, "output": 0.06},
-            "gpt-4o-mini": {"input": 0.001, "output": 0.002},
+            "gpt-4o": {"input": 0.005, "output": 0.015},
+            "gpt-4o-mini": {"input": 0.00015, "output": 0.0006},
         }
         
         if model not in pricing:
             print(f"Warning: Unknown model '{model}'. Cost set to 0.")
             return 0.0
         
-        input_cost = (input_tokens / 1000) * pricing[model]["input"]
-        output_cost = (output_tokens / 1000) * pricing[model]["output"]
+        input_cost = input_tokens * pricing[model]["input"]
+        output_cost = output_tokens * pricing[model]["output"]
         return input_cost + output_cost
 
     def update_global_usage(self, model: str, input_tokens: int, output_tokens: int, cost: float):
@@ -134,12 +134,15 @@ class Pipeline:
         generation = generation_data["generation"]
         input_tokens = generation_data["input_tokens"]
         
+        # Get the API response content
+        api_response = body.get("choices", [{}])[0].get("message", {}).get("content", "")
+        
         try:
             # Calculate tokens for the API response only
-            output_tokens = self.count_tokens(body["messages"][-1]["content"])
+            output_tokens = self.count_tokens(api_response)
         except Exception as e:
             print(f"Error counting output tokens: {e}")
-            print(f"API response content: {body['messages'][-1]['content']}")
+            print(f"API response content: {api_response}")
             output_tokens = 0  # Set a default value
 
         # If the model provides token counts, use those instead
@@ -158,7 +161,7 @@ class Pipeline:
         self.update_global_usage(body["model"], model_input_tokens, model_output_tokens, total_cost)
 
         generation.end(
-            output=body["messages"][-1]["content"],  # The API response
+            output=api_response,
             usage={
                 "prompt_tokens": model_input_tokens,
                 "completion_tokens": model_output_tokens,
