@@ -2,12 +2,16 @@ from typing import List, Optional
 import os
 import uuid
 import json
+import logging
 
 from utils.pipelines.main import get_last_assistant_message
 from pydantic import BaseModel
 from langfuse import Langfuse
 from langfuse.api.resources.commons.errors.unauthorized_error import UnauthorizedError
 
+# Set up logging
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
 
 class Pipeline:
     class Valves(BaseModel):
@@ -32,11 +36,11 @@ class Pipeline:
         self.chat_generations = {}
 
     async def on_startup(self):
-        print(f"on_startup:{__name__}")
+        logger.info(f"on_startup:{__name__}")
         self.set_langfuse()
 
     async def on_shutdown(self):
-        print(f"on_shutdown:{__name__}")
+        logger.info(f"on_shutdown:{__name__}")
         self.langfuse.flush()
 
     async def on_valves_updated(self):
@@ -48,32 +52,31 @@ class Pipeline:
                 secret_key=self.valves.secret_key,
                 public_key=self.valves.public_key,
                 host=self.valves.host,
-                debug=False,
+                debug=True,
             )
             self.langfuse.auth_check()
+            logger.info("Langfuse initialized successfully")
         except UnauthorizedError:
-            print(
-                "Langfuse credentials incorrect. Please re-enter your Langfuse credentials in the pipeline settings."
-            )
+            logger.error("Langfuse credentials incorrect. Please re-enter your Langfuse credentials in the pipeline settings.")
         except Exception as e:
-            print(f"Langfuse error: {e} Please re-enter your Langfuse credentials in the pipeline settings.")
+            logger.error(f"Langfuse error: {e} Please re-enter your Langfuse credentials in the pipeline settings.")
 
     async def inlet(self, body: dict, user: Optional[dict] = None) -> dict:
-        print(f"inlet:{__name__}")
-        print(f"Received body: {body}")
-        print(f"User: {user}")
+        logger.debug(f"inlet:{__name__}")
+        logger.debug(f"Received body: {body}")
+        logger.debug(f"User: {user}")
 
         if "chat_id" not in body:
             unique_id = f"SYSTEM MESSAGE {uuid.uuid4()}"
             body["chat_id"] = unique_id
-            print(f"chat_id was missing, set to: {unique_id}")
+            logger.info(f"chat_id was missing, set to: {unique_id}")
 
         required_keys = ["model", "messages"]
         missing_keys = [key for key in required_keys if key not in body]
         
         if missing_keys:
             error_message = f"Error: Missing keys in the request body: {', '.join(missing_keys)}"
-            print(error_message)
+            logger.error(error_message)
             raise ValueError(error_message)
 
         trace = self.langfuse.trace(
@@ -92,13 +95,14 @@ class Pipeline:
         )
 
         self.chat_generations[body["chat_id"]] = generation
-        print(trace.get_trace_url())
+        logger.info(f"Langfuse trace URL: {trace.get_trace_url()}")
 
         return body
 
     async def outlet(self, body: dict, user: Optional[dict] = None) -> dict:
-        print(f"outlet:{__name__}")
+        logger.debug(f"outlet:{__name__}")
         if body["chat_id"] not in self.chat_generations:
+            logger.warning(f"No generation found for chat_id: {body['chat_id']}")
             return body
 
         generation = self.chat_generations[body["chat_id"]]
@@ -107,8 +111,9 @@ class Pipeline:
         if isinstance(body.get("response"), str):
             try:
                 response = json.loads(body["response"])
+                logger.debug(f"Parsed response: {response}")
             except json.JSONDecodeError:
-                print("Error: Unable to parse response as JSON")
+                logger.error("Error: Unable to parse response as JSON")
                 response = {}
         else:
             response = body.get("response", {})
@@ -117,6 +122,8 @@ class Pipeline:
         generated_message = response.get("choices", [{}])[0].get("message", {}).get("content", "")
         if not generated_message:
             generated_message = get_last_assistant_message(body.get("messages", []))
+        
+        logger.debug(f"Generated message: {generated_message}")
 
         # Extract token usage from the API response
         usage = response.get("usage", {})
@@ -124,17 +131,23 @@ class Pipeline:
         completion_tokens = usage.get("completion_tokens", 0)
         total_tokens = usage.get("total_tokens", 0)
 
-        generation.end(
-            output=generated_message,
-            usage={
-                "prompt_tokens": prompt_tokens,
-                "completion_tokens": completion_tokens,
-                "total_tokens": total_tokens,
-            },
-            metadata={"interface": "open-webui"},
-        )
+        logger.info(f"Token usage - Prompt: {prompt_tokens}, Completion: {completion_tokens}, Total: {total_tokens}")
+
+        try:
+            generation.end(
+                output=generated_message,
+                usage={
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "total_tokens": total_tokens,
+                },
+                metadata={"interface": "open-webui"},
+            )
+            logger.info("Successfully logged generation to Langfuse")
+        except Exception as e:
+            logger.error(f"Error logging to Langfuse: {e}")
 
         # Print the model's response for visibility
-        print(f"Model response: {generated_message}")
+        logger.info(f"Model response: {generated_message}")
 
         return body
