@@ -60,8 +60,17 @@ class Pipeline:
         except Exception as e:
             print(f"Langfuse error: {e} Please re-enter your Langfuse credentials in the pipeline settings.")
 
-    def count_tokens(self, text: str) -> int:
-        return len(self.tokenizer.encode(text))
+    def count_tokens(self, messages: List[dict]) -> int:
+        """Count tokens for a list of messages."""
+        token_count = 0
+        for message in messages:
+            token_count += 4  # Every message follows <im_start>{role/name}\n{content}<im_end>\n
+            for key, value in message.items():
+                token_count += len(self.tokenizer.encode(value))
+                if key == "name":  # If there's a name, the role is omitted
+                    token_count -= 1  # Role is always required and always 1 token
+        token_count += 2  # Every reply is primed with <im_start>assistant
+        return token_count
 
     async def inlet(self, body: dict, user: Optional[dict] = None) -> dict:
         print(f"inlet:{__name__}")
@@ -89,11 +98,13 @@ class Pipeline:
             session_id=body["chat_id"],
         )
 
+        prompt_tokens = self.count_tokens(body["messages"])
+
         generation = trace.generation(
             name=body["chat_id"],
             model=body["model"],
             input=body["messages"],
-            metadata={"interface": "open-webui"},
+            metadata={"interface": "open-webui", "prompt_tokens": prompt_tokens},
         )
 
         self.chat_generations[body["chat_id"]] = generation
@@ -108,18 +119,21 @@ class Pipeline:
 
         generation = self.chat_generations[body["chat_id"]]
 
-        user_message = get_last_user_message(body["messages"])
-        generated_message = get_last_assistant_message(body["messages"])
+        # Count tokens for the entire message history (prompt)
+        prompt_tokens = self.count_tokens(body["messages"][:-1])  # Exclude the last message (assistant's response)
 
-        user_tokens = self.count_tokens(user_message)
-        generated_tokens = self.count_tokens(generated_message)
+        # Count tokens for the generated message
+        generated_message = get_last_assistant_message(body["messages"])
+        completion_tokens = self.count_tokens([{"role": "assistant", "content": generated_message}])
+
+        total_tokens = prompt_tokens + completion_tokens
 
         generation.end(
             output=generated_message,
             usage={
-                "prompt_tokens": user_tokens,
-                "completion_tokens": generated_tokens,
-                "total_tokens": user_tokens + generated_tokens,
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": total_tokens,
             },
             metadata={"interface": "open-webui"},
         )
