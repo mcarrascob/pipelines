@@ -29,7 +29,7 @@ class Pipeline:
         )
         self.langfuse = None
         self.chat_generations = {}
-        self.tokenizer = tiktoken.get_encoding("cl100k_base")  # Updated to a more common encoding
+        self.tokenizer = tiktoken.get_encoding("cl100k_base")
         self.global_usage = defaultdict(lambda: {"input_tokens": 0, "output_tokens": 0, "cost": 0.0})
         self.last_report_time = datetime.now()
 
@@ -112,9 +112,10 @@ class Pipeline:
             print(f"Message content: {body.get('messages', [])}")
             input_tokens = 0  # Set a default value
 
-        generation = trace.generation(
+        generation = trace.generation_start(
             name=body.get("chat_id", "unknown"),
             model=body.get("model", "unknown"),
+            model_parameters=body.get("model_parameters", {}),
             input=body.get("messages", []),
             metadata={"interface": "open-webui", "input_tokens": input_tokens},
         )
@@ -122,9 +123,8 @@ class Pipeline:
         self.chat_generations[body.get("chat_id", "unknown")] = {
             "generation": generation,
             "input_tokens": input_tokens,
-            "trace": trace,
         }
-        print(trace.get_trace_url())
+        print(f"Trace URL: {trace.get_trace_url()}")
 
         return body
 
@@ -138,7 +138,6 @@ class Pipeline:
         generation_data = self.chat_generations[chat_id]
         generation = generation_data["generation"]
         input_tokens = generation_data["input_tokens"]
-        trace = generation_data["trace"]
 
         # Extract all relevant data from the API response
         api_response = body.get("content", "")
@@ -166,19 +165,15 @@ class Pipeline:
 
         generation.end(
             output=api_response,
-            usage={
-                "prompt_tokens": model_input_tokens,
-                "completion_tokens": model_output_tokens,
-                "total_tokens": total_tokens,
-                "total_cost": total_cost,
-            },
+            prompt_tokens=model_input_tokens,
+            completion_tokens=model_output_tokens,
             metadata={
                 "interface": "open-webui",
-                "output_tokens": model_output_tokens,
                 "model": model,
                 "finish_reason": finish_reason,
                 "created": created,
                 "response_id": response_id,
+                "total_cost": total_cost,
             },
         )
 
@@ -193,8 +188,5 @@ class Pipeline:
 
         # Clean up the stored data for this chat
         del self.chat_generations[chat_id]
-
-        # End the trace
-        trace.end()
 
         return body
