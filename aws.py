@@ -1,20 +1,11 @@
-"""
-title: AWS Bedrock Claude Pipeline
-author: G-mario
-date: 2024-08-18
-version: 1.0
-license: MIT
-description: A pipeline for generating text and processing images using the AWS Bedrock API(By Anthropic claude).
-requirements: requests, boto3
-environment_variables: AWS_ACCESS_KEY, AWS_SECRET_KEY, AWS_REGION_NAME
-"""
 import base64
 import json
 import logging
 from io import BytesIO
-from typing import List, Union, Generator, Iterator
+from typing import List, Union, Generator, Iterator, Optional
 
 import boto3
+from botocore.exceptions import ClientError
 
 from pydantic import BaseModel
 
@@ -32,12 +23,7 @@ class Pipeline:
 
     def __init__(self):
         self.type = "manifold"
-        # Optionally, you can set the id and name of the pipeline.
-        # Best practice is to not specify the id so that it can be automatically inferred from the filename, so that users can install multiple versions of the same pipeline.
-        # The identifier must be unique across all pipelines.
-        # The identifier must be an alphanumeric string that can include underscores or hyphens. It cannot contain spaces, special characters, slashes, or backslashes.
-        # self.id = "openai_pipeline"
-        self.name = "Bedrock: "
+        self.name = "AWS Bedrock: "
 
         self.valves = self.Valves(
             **{
@@ -47,70 +33,64 @@ class Pipeline:
             }
         )
 
-        self.bedrock = boto3.client(aws_access_key_id=self.valves.AWS_ACCESS_KEY,
-                                    aws_secret_access_key=self.valves.AWS_SECRET_KEY,
-                                    service_name="bedrock",
-                                    region_name=self.valves.AWS_REGION_NAME)
-        self.bedrock_runtime = boto3.client(aws_access_key_id=self.valves.AWS_ACCESS_KEY,
-                                            aws_secret_access_key=self.valves.AWS_SECRET_KEY,
-                                            service_name="bedrock-runtime",
-                                            region_name=self.valves.AWS_REGION_NAME)
+        self.bedrock = None
+        self.bedrock_runtime = None
+        self.pipelines = []
+        self.initialize_clients()
 
-        self.pipelines = self.get_models()
-
+    def initialize_clients(self):
+        try:
+            self.bedrock = boto3.client(
+                aws_access_key_id=self.valves.AWS_ACCESS_KEY,
+                aws_secret_access_key=self.valves.AWS_SECRET_KEY,
+                service_name="bedrock",
+                region_name=self.valves.AWS_REGION_NAME
+            )
+            self.bedrock_runtime = boto3.client(
+                aws_access_key_id=self.valves.AWS_ACCESS_KEY,
+                aws_secret_access_key=self.valves.AWS_SECRET_KEY,
+                service_name="bedrock-runtime",
+                region_name=self.valves.AWS_REGION_NAME
+            )
+            self.pipelines = self.get_models()
+        except ClientError as e:
+            print(f"Failed to initialize AWS clients: {e}")
+            self.pipelines = [{"id": "error", "name": "Failed to initialize AWS clients. Please check your credentials."}]
 
     async def on_startup(self):
-        # This function is called when the server is started.
         print(f"on_startup:{__name__}")
-        pass
 
     async def on_shutdown(self):
-        # This function is called when the server is stopped.
         print(f"on_shutdown:{__name__}")
-        pass
 
     async def on_valves_updated(self):
-        # This function is called when the valves are updated.
         print(f"on_valves_updated:{__name__}")
-        self.bedrock = boto3.client(aws_access_key_id=self.valves.AWS_ACCESS_KEY,
-                                    aws_secret_access_key=self.valves.AWS_SECRET_KEY,
-                                    service_name="bedrock",
-                                    region_name=self.valves.AWS_REGION_NAME)
-        self.bedrock_runtime = boto3.client(aws_access_key_id=self.valves.AWS_ACCESS_KEY,
-                                            aws_secret_access_key=self.valves.AWS_SECRET_KEY,
-                                            service_name="bedrock-runtime",
-                                            region_name=self.valves.AWS_REGION_NAME)
-        self.pipelines = self.get_models()
-
-    def pipelines(self) -> List[dict]:
-        return self.get_models()
+        self.initialize_clients()
 
     def get_models(self):
-        if self.valves.AWS_ACCESS_KEY and self.valves.AWS_SECRET_KEY:
-            try:
-                response = self.bedrock.list_foundation_models(byProvider='Anthropic', byInferenceType='ON_DEMAND')
-                return [
-                    {
-                        "id": model["modelId"],
-                        "name": model["modelName"],
-                    }
-                    for model in response["modelSummaries"]
-                ]
-            except Exception as e:
-                print(f"Error: {e}")
-                return [
-                    {
-                        "id": "error",
-                        "name": "Could not fetch models from Bedrock, please update the Access/Secret Key in the valves.",
-                    },
-                ]
-        else:
+        if not self.bedrock:
             return []
+        try:
+            response = self.bedrock.list_foundation_models(byProvider='Anthropic', byInferenceType='ON_DEMAND')
+            return [
+                {
+                    "id": model["modelId"],
+                    "name": model["modelName"],
+                }
+                for model in response["modelSummaries"]
+            ]
+        except ClientError as e:
+            print(f"Error fetching models: {e}")
+            return [
+                {
+                    "id": "error",
+                    "name": "Could not fetch models from Bedrock, please update the Access/Secret Key in the valves.",
+                },
+            ]
 
     def pipe(
         self, user_message: str, model_id: str, messages: List[dict], body: dict
     ) -> Union[str, Generator, Iterator]:
-        # This is where you can add your custom pipelines like RAG.
         print(f"pipe:{__name__}")
 
         system_message, messages = pop_system_message(messages)
@@ -118,31 +98,23 @@ class Pipeline:
         logging.info(f"pop_system_message: {json.dumps(messages)}")
 
         try:
-            processed_messages = []
-            image_count = 0
-            for message in messages:
-                processed_content = []
-                if isinstance(message.get("content"), list):
-                    for item in message["content"]:
-                        if item["type"] == "text":
-                            processed_content.append({"text": item["text"]})
-                        elif item["type"] == "image_url":
-                            if image_count >= 20:
-                                raise ValueError("Maximum of 20 images per API call exceeded")
-                            processed_image = self.process_image(item["image_url"])
-                            processed_content.append(processed_image)
-                            image_count += 1
-                else:
-                    processed_content = [{"text": message.get("content", "")}]
+            processed_messages = self.process_messages(messages)
+            
+            payload = {
+                "modelId": model_id,
+                "messages": processed_messages,
+                "anthropic_version": "bedrock-2023-05-31",
+                "max_tokens": body.get("max_tokens", 4096),
+                "temperature": body.get("temperature", 0.7),
+                "top_k": body.get("top_k", 250),
+                "top_p": body.get("top_p", 1),
+                "stop_sequences": body.get("stop", []),
+                "stream": body.get("stream", False),
+            }
 
-                processed_messages.append({"role": message["role"], "content": processed_content})
+            if system_message:
+                payload["system"] = system_message
 
-            payload = {"modelId": model_id,
-                       "messages": processed_messages,
-                       "system": [{'text': system_message if system_message else 'you are an intelligent ai assistant'}],
-                       "inferenceConfig": {"temperature": body.get("temperature", 0.5)},
-                       "additionalModelRequestFields": {"top_k": body.get("top_k", 200), "top_p": body.get("top_p", 0.9)}
-                       }
             if body.get("stream", False):
                 return self.stream_response(model_id, payload)
             else:
@@ -150,31 +122,62 @@ class Pipeline:
         except Exception as e:
             return f"Error: {e}"
 
-    def process_image(self, image: str):
+    def process_messages(self, messages: List[dict]) -> List[dict]:
+        processed_messages = []
+        image_count = 0
+        for message in messages:
+            processed_content = []
+            if isinstance(message.get("content"), list):
+                for item in message["content"]:
+                    if item["type"] == "text":
+                        processed_content.append(item["text"])
+                    elif item["type"] == "image_url":
+                        if image_count >= 20:
+                            raise ValueError("Maximum of 20 images per API call exceeded")
+                        processed_image = self.process_image(item["image_url"])
+                        processed_content.append(processed_image)
+                        image_count += 1
+            else:
+                processed_content = message.get("content", "")
+
+            processed_messages.append({"role": message["role"], "content": processed_content})
+        return processed_messages
+
+    def process_image(self, image: dict) -> str:
         img_stream = None
         if image["url"].startswith("data:image"):
-            if ',' in image["url"]:
-                base64_string = image["url"].split(',')[1]
+            base64_string = image["url"].split(',')[1]
             image_data = base64.b64decode(base64_string)
-
             img_stream = BytesIO(image_data)
         else:
             img_stream = requests.get(image["url"]).content
-        return {
-            "image": {"format": "png" if image["url"].endswith(".png") else "jpeg",
-                      "source": {"bytes": img_stream.read()}}
-        }
+        
+        image_base64 = base64.b64encode(img_stream.read()).decode('utf-8')
+        return f"<image>{image_base64}</image>"
 
     def stream_response(self, model_id: str, payload: dict) -> Generator:
-        if "system" in payload:
-            del payload["system"]
-        if "additionalModelRequestFields" in payload:
-            del payload["additionalModelRequestFields"]
-        streaming_response = self.bedrock_runtime.converse_stream(**payload)
-        for chunk in streaming_response["stream"]:
-            if "contentBlockDelta" in chunk:
-                yield chunk["contentBlockDelta"]["delta"]["text"]
+        try:
+            response = self.bedrock_runtime.invoke_model_with_response_stream(
+                modelId=model_id,
+                body=json.dumps(payload)
+            )
+            for event in response['body']:
+                chunk = json.loads(event['chunk']['bytes'].decode())
+                if chunk['type'] == 'content_block_delta':
+                    yield chunk['delta']['text']
+                elif chunk['type'] == 'message_delta':
+                    if 'stop_reason' in chunk['delta']:
+                        break
+        except ClientError as e:
+            yield f"Error: {e}"
 
     def get_completion(self, model_id: str, payload: dict) -> str:
-        response = self.bedrock_runtime.converse(**payload)
-        return response['output']['message']['content'][0]['text']
+        try:
+            response = self.bedrock_runtime.invoke_model(
+                modelId=model_id,
+                body=json.dumps(payload)
+            )
+            response_body = json.loads(response['body'].read())
+            return response_body['content'][0]['text']
+        except ClientError as e:
+            return f"Error: {e}"
