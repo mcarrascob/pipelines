@@ -16,6 +16,7 @@ class Pipeline:
     class Valves(BaseModel):
         AWS_ACCESS_KEY: str = ""
         AWS_SECRET_KEY: str = ""
+        AWS_SESSION_TOKEN: str = ""  # Added AWS session token
         AWS_REGION_NAME: str = ""
 
     def __init__(self):
@@ -25,6 +26,7 @@ class Pipeline:
         self.valves = self.Valves(
             AWS_ACCESS_KEY=os.getenv("AWS_ACCESS_KEY", ""),
             AWS_SECRET_KEY=os.getenv("AWS_SECRET_KEY", ""),
+            AWS_SESSION_TOKEN=os.getenv("AWS_SESSION_TOKEN", ""),  # Added AWS session token
             AWS_REGION_NAME=os.getenv("AWS_REGION_NAME", "us-east-1"),
         )
 
@@ -50,17 +52,24 @@ class Pipeline:
                 self.pipelines = [{"id": "error", "name": "AWS credentials not provided. Please update the valves."}]
                 return
 
+            # Create a dictionary of AWS credentials
+            aws_credentials = {
+                "aws_access_key_id": self.valves.AWS_ACCESS_KEY,
+                "aws_secret_access_key": self.valves.AWS_SECRET_KEY,
+                "region_name": self.valves.AWS_REGION_NAME
+            }
+
+            # Add session token if it's provided
+            if self.valves.AWS_SESSION_TOKEN:
+                aws_credentials["aws_session_token"] = self.valves.AWS_SESSION_TOKEN
+
             self.bedrock = boto3.client(
-                aws_access_key_id=self.valves.AWS_ACCESS_KEY,
-                aws_secret_access_key=self.valves.AWS_SECRET_KEY,
                 service_name="bedrock",
-                region_name=self.valves.AWS_REGION_NAME
+                **aws_credentials
             )
             self.bedrock_runtime = boto3.client(
-                aws_access_key_id=self.valves.AWS_ACCESS_KEY,
-                aws_secret_access_key=self.valves.AWS_SECRET_KEY,
                 service_name="bedrock-runtime",
-                region_name=self.valves.AWS_REGION_NAME
+                **aws_credentials
             )
             self.pipelines = self.get_models()
         except (ClientError, NoCredentialsError) as e:
