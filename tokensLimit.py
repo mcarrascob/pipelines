@@ -1,5 +1,5 @@
 import os
-from typing import List, Optional
+from typing import List, Optional, Dict
 from pydantic import BaseModel
 from schemas import OpenAIChatMessage
 import tiktoken
@@ -12,7 +12,7 @@ class Pipeline:
 
     def __init__(self):
         self.type = "filter"
-        self.name = "Token Limit Filter"
+        self.name = "Comprehensive Token Limit Filter"
 
         self.valves = self.Valves(
             **{
@@ -23,7 +23,8 @@ class Pipeline:
             }
         )
 
-        self.user_tokens = {}  # Dictionary to track user tokens
+        self.user_tokens: Dict[str, int] = {}  # Dictionary to track user tokens
+        self.user_conversations: Dict[str, List[Dict]] = {}  # Dictionary to track user conversations
         self.tokenizer = tiktoken.get_encoding("cl100k_base")  # Initialize tokenizer
 
     async def on_startup(self):
@@ -32,12 +33,29 @@ class Pipeline:
     async def on_shutdown(self):
         print(f"on_shutdown:{__name__}")
 
-    def count_tokens(self, messages: List[OpenAIChatMessage]) -> int:
-        return sum(len(self.tokenizer.encode(str(message))) for message in messages)
+    def count_tokens(self, messages: List[Dict]) -> int:
+        return sum(len(self.tokenizer.encode(msg.get('content', ''))) for msg in messages)
 
     def token_limited(self, user_id: str, new_tokens: int) -> bool:
         current_tokens = self.user_tokens.get(user_id, 0)
         return current_tokens + new_tokens > self.valves.max_tokens_per_user
+
+    def update_conversation(self, user_id: str, new_message: Dict, is_user: bool = True):
+        if user_id not in self.user_conversations:
+            self.user_conversations[user_id] = []
+        
+        self.user_conversations[user_id].append({
+            'role': 'user' if is_user else 'assistant',
+            'content': new_message.get('content', '')
+        })
+
+    def get_total_tokens(self, user_id: str, new_message: Dict) -> int:
+        conversation = self.user_conversations.get(user_id, [])
+        conversation_with_new = conversation + [{
+            'role': 'user',
+            'content': new_message.get('content', '')
+        }]
+        return self.count_tokens(conversation_with_new)
 
     async def inlet(self, body: dict, user: Optional[dict] = None) -> dict:
         print(f"pipe:{__name__}")
@@ -47,16 +65,28 @@ class Pipeline:
         if user and user.get("role", "admin") == "user":
             user_id = user.get("id", "default_user")
             
-            # Count tokens in the new message and context
-            new_message_tokens = self.count_tokens([body.get("message", {})])
-            context_tokens = self.count_tokens(body.get("context", []))
-            total_new_tokens = new_message_tokens + context_tokens
+            new_message = body.get("message", {})
+            total_tokens = self.get_total_tokens(user_id, new_message)
 
             # Check token limit
-            if self.token_limited(user_id, total_new_tokens):
-                raise Exception("Token limit exceeded. Please try again later.")
+            if self.token_limited(user_id, total_tokens):
+                raise Exception("Token limit exceeded. Please start a new conversation.")
 
-            # Update token count
-            self.user_tokens[user_id] = self.user_tokens.get(user_id, 0) + total_new_tokens
+            # Update conversation and token count
+            self.update_conversation(user_id, new_message)
+            self.user_tokens[user_id] = total_tokens
 
         return body
+
+    async def outlet(self, response: dict, user: Optional[dict] = None) -> dict:
+        if user and user.get("role", "admin") == "user":
+            user_id = user.get("id", "default_user")
+            
+            # Update conversation with model's response
+            self.update_conversation(user_id, response, is_user=False)
+            
+            # Recalculate total tokens including model's response
+            total_tokens = self.get_total_tokens(user_id, {})
+            self.user_tokens[user_id] = total_tokens
+
+        return response
