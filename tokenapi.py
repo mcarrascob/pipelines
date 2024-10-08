@@ -67,18 +67,25 @@ class Pipeline:
                 body['messages'] = [{'role': 'system', 'content': 'You have no available tokens. Please recharge your account to continue using the service.'}]
                 return body
             
-            body['user_tokens'] = user_tokens
+            # Calculate tokens for the incoming message
+            incoming_tokens = self.count_tokens(body.get('messages', []))
+            if incoming_tokens > user_tokens:
+                body['messages'] = [{'role': 'system', 'content': f'Your message requires {incoming_tokens} tokens, but you only have {user_tokens} available. Please shorten your message or recharge your account.'}]
+                return body
+
+            # Deduct tokens for the incoming message
+            if not await self.use_tokens(user_id, incoming_tokens):
+                body['messages'] = [{'role': 'system', 'content': 'Failed to process your request. Please try again later or contact support.'}]
+                return body
 
         return body
 
     async def outlet(self, body: dict, user: Optional[dict] = None) -> dict:
-        if user and user.get("role") == "user" and 'user_tokens' in body:
+        if user and user.get("role") == "user":
             user_id = user.get("id", "default_user")
             response_tokens = self.count_tokens([{'content': body.get('content', '')}])
             
             if not await self.use_tokens(user_id, response_tokens):
                 self.logger.warning(f"Failed to deduct {response_tokens} tokens for user {user_id}")
-            
-            del body['user_tokens']
 
         return body
