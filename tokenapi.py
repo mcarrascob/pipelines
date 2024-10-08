@@ -59,11 +59,9 @@ class Pipeline:
             
             if user_tokens == -1:
                 self.logger.warning("Token API unavailable. Proceeding without token check.")
-                body['user_tokens'] = None  # Indicate that we couldn't check tokens
             elif user_tokens <= 0:
-                # Instead of clearing messages, add an informative message
+                # Instead of setting a 'stop' flag, we'll add an informative message
                 body['messages'] = [{'role': 'system', 'content': 'You have no available tokens. Please recharge your account to continue using the service.'}]
-                body['stop'] = True
             else:
                 body['user_tokens'] = user_tokens
 
@@ -71,10 +69,6 @@ class Pipeline:
 
     async def outlet(self, body: dict, user: Optional[dict] = None) -> dict:
         if user and user.get("role") == "user" and 'user_tokens' in body:
-            if body['user_tokens'] is None:
-                self.logger.warning("Skipping token deduction due to earlier API error.")
-                return body
-
             user_id = user.get("id", "default_user")
             response_tokens = self.count_tokens([{'content': body.get('content', '')}])
             
