@@ -9,15 +9,11 @@ class Pipeline:
     class Valves(BaseModel):
         pipelines: List[str] = []
         priority: int = 0
-        max_tokens_per_user: int
 
     def __init__(self):
         self.type = "filter"
         self.name = "API-Based Token Limit Filter"
-        self.valves = self.Valves(
-            pipelines=["*"],
-            max_tokens_per_user=int(os.getenv("MAX_TOKENS_PER_USER", 1000000))  # Default to 1 million tokens
-        )
+        self.valves = self.Valves(pipelines=["*"])
         self.tokenizer = tiktoken.get_encoding("cl100k_base")  # Use a single tokenizer for simplicity
         self.api_url = os.getenv("TOKEN_API_URL", "http://localhost:5000")  # Set your API URL here
 
@@ -28,38 +24,52 @@ class Pipeline:
             token_count += len(self.tokenizer.encode(message.get('content', '')))
         return token_count
 
-    async def check_and_use_tokens(self, user_id: str, tokens: int) -> bool:
-        """Check if user has enough tokens and use them if available."""
+    async def check_user_tokens(self, user_id: str) -> int:
+        """Check user's token balance."""
         async with aiohttp.ClientSession() as session:
-            # First, check the user's token balance
             async with session.get(f"{self.api_url}/get_tokens?username={user_id}") as response:
-                if response.status != 200:
+                if response.status == 404:
+                    return 0  # User not found in the database
+                elif response.status != 200:
                     raise Exception(f"Failed to get token balance: {await response.text()}")
-                balance = (await response.json())['tokens']
+                return (await response.json())['tokens']
 
-            if balance < tokens:
-                return False
-
-            # If enough tokens, use them
+    async def use_tokens(self, user_id: str, tokens: int) -> bool:
+        """Use tokens for a user."""
+        async with aiohttp.ClientSession() as session:
             async with session.post(f"{self.api_url}/use_tokens", json={"username": user_id, "tokens": tokens}) as response:
                 if response.status != 200:
                     raise Exception(f"Failed to use tokens: {await response.text()}")
-
-        return True
+                return True
 
     async def inlet(self, body: dict, user: Optional[dict] = None) -> dict:
         if user and user.get("role") == "user":
             user_id = user.get("id", "default_user")
             
-            # Count tokens in the new message and all previous messages
-            new_tokens = self.count_tokens(body.get("messages", []))
+            # Check user's token balance
+            user_tokens = await self.check_user_tokens(user_id)
             
-            # Check if user has enough tokens and use them
-            if not await self.check_and_use_tokens(user_id, new_tokens):
-                raise Exception("Insufficient tokens. Message blocked.")
+            if user_tokens <= 0:
+                # User not in DB or has no tokens
+                body['messages'] = []  # Clear messages to prevent LLM response
+                body['stop'] = True  # Signal to stop processing
+            else:
+                # User has tokens, attach token count to body for later use
+                body['user_tokens'] = user_tokens
 
         return body
 
     async def outlet(self, body: dict, user: Optional[dict] = None) -> dict:
-        # We don't need to do anything in the outlet for this version
+        if user and user.get("role") == "user" and 'user_tokens' in body:
+            user_id = user.get("id", "default_user")
+            
+            # Count tokens in the LLM response
+            response_tokens = self.count_tokens([{'content': body.get('content', '')}])
+            
+            # Use (deduct) tokens
+            await self.use_tokens(user_id, response_tokens)
+            
+            # Remove the user_tokens field from the body
+            del body['user_tokens']
+
         return body
