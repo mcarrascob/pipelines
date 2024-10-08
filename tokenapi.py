@@ -4,6 +4,7 @@ from pydantic import BaseModel
 import tiktoken
 import aiohttp
 import json
+import logging
 
 class Pipeline:
     class Valves(BaseModel):
@@ -16,60 +17,70 @@ class Pipeline:
         self.valves = self.Valves(pipelines=["*"])
         self.tokenizer = tiktoken.get_encoding("cl100k_base")  # Use a single tokenizer for simplicity
         self.api_url = os.getenv("TOKEN_API_URL", "http://host.docker.internal:8509")  # Set your API URL here
+        self.logger = logging.getLogger(__name__)
 
     def count_tokens(self, messages: List[dict]) -> int:
-        """Count tokens for a list of messages."""
         token_count = 0
         for message in messages:
             token_count += len(self.tokenizer.encode(message.get('content', '')))
         return token_count
 
     async def check_user_tokens(self, user_id: str) -> int:
-        """Check user's token balance."""
-        async with aiohttp.ClientSession() as session:
-            async with session.get(f"{self.api_url}/get_tokens?username={user_id}") as response:
-                if response.status == 404:
-                    return 0  # User not found in the database
-                elif response.status != 200:
-                    raise Exception(f"Failed to get token balance: {await response.text()}")
-                return (await response.json())['tokens']
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(f"{self.api_url}/get_tokens?username={user_id}") as response:
+                    if response.status == 404:
+                        return 0
+                    elif response.status != 200:
+                        self.logger.error(f"Failed to get token balance: {await response.text()}")
+                        return -1  # Indicate an error occurred
+                    return (await response.json())['tokens']
+        except aiohttp.ClientConnectorError:
+            self.logger.error(f"Cannot connect to token API at {self.api_url}")
+            return -1  # Indicate an error occurred
 
     async def use_tokens(self, user_id: str, tokens: int) -> bool:
-        """Use tokens for a user."""
-        async with aiohttp.ClientSession() as session:
-            async with session.post(f"{self.api_url}/use_tokens", json={"username": user_id, "tokens": tokens}) as response:
-                if response.status != 200:
-                    raise Exception(f"Failed to use tokens: {await response.text()}")
-                return True
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(f"{self.api_url}/use_tokens", json={"username": user_id, "tokens": tokens}) as response:
+                    if response.status != 200:
+                        self.logger.error(f"Failed to use tokens: {await response.text()}")
+                        return False
+                    return True
+        except aiohttp.ClientConnectorError:
+            self.logger.error(f"Cannot connect to token API at {self.api_url}")
+            return False
 
     async def inlet(self, body: dict, user: Optional[dict] = None) -> dict:
         if user and user.get("role") == "user":
             user_id = user.get("id", "default_user")
             
-            # Check user's token balance
             user_tokens = await self.check_user_tokens(user_id)
             
-            if user_tokens <= 0:
-                # User not in DB or has no tokens
-                body['messages'] = []  # Clear messages to prevent LLM response
-                body['stop'] = True  # Signal to stop processing
+            if user_tokens == -1:
+                self.logger.warning("Token API unavailable. Proceeding without token check.")
+                body['user_tokens'] = None  # Indicate that we couldn't check tokens
+            elif user_tokens <= 0:
+                # Instead of clearing messages, add an informative message
+                body['messages'] = [{'role': 'system', 'content': 'You have no available tokens. Please recharge your account to continue using the service.'}]
+                body['stop'] = True
             else:
-                # User has tokens, attach token count to body for later use
                 body['user_tokens'] = user_tokens
 
         return body
 
     async def outlet(self, body: dict, user: Optional[dict] = None) -> dict:
         if user and user.get("role") == "user" and 'user_tokens' in body:
+            if body['user_tokens'] is None:
+                self.logger.warning("Skipping token deduction due to earlier API error.")
+                return body
+
             user_id = user.get("id", "default_user")
-            
-            # Count tokens in the LLM response
             response_tokens = self.count_tokens([{'content': body.get('content', '')}])
             
-            # Use (deduct) tokens
-            await self.use_tokens(user_id, response_tokens)
+            if not await self.use_tokens(user_id, response_tokens):
+                self.logger.warning(f"Failed to deduct {response_tokens} tokens for user {user_id}")
             
-            # Remove the user_tokens field from the body
             del body['user_tokens']
 
         return body
