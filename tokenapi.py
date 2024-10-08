@@ -15,7 +15,7 @@ class Pipeline:
         self.name = "API-Based Token Limit Filter"
         self.valves = self.Valves(pipelines=["*"])
         self.tokenizer = tiktoken.get_encoding("cl100k_base")  # Use a single tokenizer for simplicity
-        self.api_url = os.getenv("TOKEN_API_URL", "http://localhost:5000")  # Set your API URL here
+        self.api_url = os.getenv("TOKEN_API_URL", "http://0.0.0.0:5000")  # Set your API URL here
 
     def count_tokens(self, messages: List[dict]) -> int:
         """Count tokens for a list of messages."""
