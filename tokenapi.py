@@ -15,8 +15,8 @@ class Pipeline:
         self.type = "filter"
         self.name = "API-Based Token Limit Filter"
         self.valves = self.Valves(pipelines=["*"])
-        self.tokenizer = tiktoken.get_encoding("cl100k_base")  # Use a single tokenizer for simplicity
-        self.api_url = os.getenv("TOKEN_API_URL", "http://host.docker.internal:8509")  # Set your API URL here
+        self.tokenizer = tiktoken.get_encoding("cl100k_base")
+        self.api_url = os.getenv("TOKEN_API_URL", "http://host.docker.internal:8509")
         self.logger = logging.getLogger(__name__)
 
     def count_tokens(self, messages: List[dict]) -> int:
@@ -25,19 +25,20 @@ class Pipeline:
             token_count += len(self.tokenizer.encode(message.get('content', '')))
         return token_count
 
-    async def check_user_tokens(self, user_id: str) -> int:
+    async def check_user_tokens(self, user_id: str) -> Optional[int]:
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.get(f"{self.api_url}/get_tokens?username={user_id}") as response:
                     if response.status == 404:
-                        return 0
+                        self.logger.warning(f"User {user_id} not found in the token API")
+                        return None
                     elif response.status != 200:
                         self.logger.error(f"Failed to get token balance: {await response.text()}")
-                        return -1  # Indicate an error occurred
+                        return None
                     return (await response.json())['tokens']
         except aiohttp.ClientConnectorError:
             self.logger.error(f"Cannot connect to token API at {self.api_url}")
-            return -1  # Indicate an error occurred
+            return None
 
     async def use_tokens(self, user_id: str, tokens: int) -> bool:
         try:
@@ -57,13 +58,16 @@ class Pipeline:
             
             user_tokens = await self.check_user_tokens(user_id)
             
-            if user_tokens == -1:
-                self.logger.warning("Token API unavailable. Proceeding without token check.")
-            elif user_tokens <= 0:
-                # Instead of setting a 'stop' flag, we'll add an informative message
+            if user_tokens is None:
+                # User not found in API or API error
+                body['messages'] = [{'role': 'system', 'content': 'Unable to verify user token balance. Please try again later or contact support.'}]
+                return body
+            
+            if user_tokens <= 0:
                 body['messages'] = [{'role': 'system', 'content': 'You have no available tokens. Please recharge your account to continue using the service.'}]
-            else:
-                body['user_tokens'] = user_tokens
+                return body
+            
+            body['user_tokens'] = user_tokens
 
         return body
 
