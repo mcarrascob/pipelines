@@ -23,6 +23,7 @@ class Pipeline:
         self.api_url = os.getenv("TOKEN_API_URL", "http://host.docker.internal:8509")
         self.logger = logging.getLogger(__name__)
         self.tokenizer = tiktoken.get_encoding("cl100k_base")
+        self.token_info = {}  # New attribute to store token information
 
     async def on_startup(self):
         print(f"on_startup:{__name__}")
@@ -105,8 +106,8 @@ class Pipeline:
 
                 self.logger.info(f"User {username} conversation requires {incoming_tokens} tokens. Current balance: {user_tokens}")
                 
-                # Add token information to the body for later use
-                body['__token_info'] = {
+                # Store token information in the class attribute
+                self.token_info[username] = {
                     'incoming_tokens': incoming_tokens,
                     'user_tokens': user_tokens
                 }
@@ -122,9 +123,9 @@ class Pipeline:
             username = user.get("name", "default_user")
 
             try:
-                token_info = body.pop('__token_info', None)
+                token_info = self.token_info.pop(username, None)
                 if token_info is None:
-                    raise Exception("Token information not found in body. Make sure inlet() was called before outlet().")
+                    raise Exception("Token information not found. Make sure inlet() was called before outlet().")
 
                 # Calculate tokens for the new response
                 response_tokens = self.count_output_tokens(body.get('content', ''))
