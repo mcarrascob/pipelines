@@ -5,6 +5,7 @@ import tiktoken
 import aiohttp
 import logging
 import json
+import uuid
 
 class Pipeline:
     class Valves(BaseModel):
@@ -22,8 +23,8 @@ class Pipeline:
         )
         self.api_url = os.getenv("TOKEN_API_URL", "http://host.docker.internal:8509")
         self.logger = logging.getLogger(__name__)
-        self.tokenizer = tiktoken.get_encoding("cl100k_base")
-        self.token_info = {}  # Attribute to store token information
+        self.tokenizers = {}
+        self.chat_generations = {}
 
     async def on_startup(self):
         print(f"on_startup:{__name__}")
@@ -31,13 +32,24 @@ class Pipeline:
     async def on_shutdown(self):
         print(f"on_shutdown:{__name__}")
 
-    def count_tokens(self, messages: List[dict]) -> int:
+    def get_tokenizer(self, model: str):
+        if model not in self.tokenizers:
+            try:
+                self.tokenizers[model] = tiktoken.encoding_for_model(model)
+            except KeyError:
+                print(f"Warning: Model {model} not found. Using default tokenizer.")
+                self.tokenizers[model] = tiktoken.get_encoding("cl100k_base")
+        return self.tokenizers[model]
+
+    def count_tokens(self, messages: List[dict], model: str) -> int:
         """Count tokens for a list of messages."""
+        tokenizer = self.get_tokenizer(model)
         token_count = 0
+        
         for message in messages:
             token_count += 4  # Every message follows <im_start>{role/name}\n{content}<im_end>\n
             for key, value in message.items():
-                token_count += len(self.tokenizer.encode(str(value)))
+                token_count += len(tokenizer.encode(str(value)))
             
             if "name" in message:  # If there's a name, the role is omitted
                 token_count -= 1  # Role is always required and always 1 token
@@ -50,16 +62,17 @@ class Pipeline:
 
         return token_count
 
-    def count_output_tokens(self, message: str) -> int:
+    def count_output_tokens(self, message: str, model: str) -> int:
         """Count tokens for the output message, accounting for potential JSON structure."""
+        tokenizer = self.get_tokenizer(model)
         try:
             # Try to parse the message as JSON
             parsed_message = json.loads(message)
             # If successful, count tokens for the entire JSON structure
-            return len(self.tokenizer.encode(json.dumps(parsed_message)))
+            return len(tokenizer.encode(json.dumps(parsed_message)))
         except json.JSONDecodeError:
             # If not JSON, count tokens for the raw string
-            return len(self.tokenizer.encode(message))
+            return len(tokenizer.encode(message))
 
     async def get_user_info(self, username: str) -> Optional[int]:
         try:
@@ -89,6 +102,19 @@ class Pipeline:
         print(f"Received body: {body}")
         print(f"User: {user}")
 
+        if "chat_id" not in body:
+            unique_id = f"SYSTEM MESSAGE {uuid.uuid4()}"
+            body["chat_id"] = unique_id
+            print(f"chat_id was missing, set to: {unique_id}")
+
+        required_keys = ["model", "messages"]
+        missing_keys = [key for key in required_keys if key not in body]
+        
+        if missing_keys:
+            error_message = f"Error: Missing keys in the request body: {', '.join(missing_keys)}"
+            print(error_message)
+            raise ValueError(error_message)
+
         if user and user.get("role") in self.valves.target_user_roles:
             username = user.get("name", "default_user")
             
@@ -99,17 +125,19 @@ class Pipeline:
                     raise Exception("Sorry, you don't have any tokens left. Please purchase more tokens to continue using our service.")
                 
                 # Calculate tokens for the entire conversation context
-                incoming_tokens = self.count_tokens(body.get('messages', []))
+                input_tokens = self.count_tokens(body["messages"], body["model"])
                 
-                if incoming_tokens > user_tokens:
-                    raise Exception(f"Your conversation requires {incoming_tokens} tokens, but you only have {user_tokens} available. Please shorten your message or purchase more tokens.")
+                if input_tokens > user_tokens:
+                    raise Exception(f"Your conversation requires {input_tokens} tokens, but you only have {user_tokens} available. Please shorten your message or purchase more tokens.")
 
-                self.logger.info(f"User {username} conversation requires {incoming_tokens} tokens. Current balance: {user_tokens}")
+                self.logger.info(f"User {username} conversation requires {input_tokens} tokens. Current balance: {user_tokens}")
                 
-                # Store token information in the class attribute
-                self.token_info[username] = {
-                    'incoming_tokens': incoming_tokens,
-                    'user_tokens': user_tokens
+                # Store token information
+                self.chat_generations[body["chat_id"]] = {
+                    "input_tokens": input_tokens,
+                    "model": body["model"],
+                    "username": username,
+                    "user_tokens": user_tokens
                 }
             
             except Exception as e:
@@ -119,36 +147,59 @@ class Pipeline:
         return body
 
     async def outlet(self, body: dict, user: Optional[dict] = None) -> dict:
-        if user and user.get("role") in self.valves.target_user_roles:
-            username = user.get("name", "default_user")
+        print(f"outlet:{__name__}")
+        if body["chat_id"] not in self.chat_generations:
+            return body
 
-            try:
-                token_info = self.token_info.pop(username, None)
-                if token_info is None:
-                    raise Exception("Token information not found. Make sure inlet() was called before outlet().")
+        generation_data = self.chat_generations[body["chat_id"]]
+        fallback_input_tokens = generation_data["input_tokens"]
+        model = generation_data["model"]
+        username = generation_data["username"]
 
-                # Calculate tokens for the new response
-                response_tokens = self.count_output_tokens(body.get('content', ''))
+        # Get the last assistant message
+        generated_message = body["messages"][-1]["content"] if body["messages"] else ""
 
-                # Total tokens to deduct (incoming + response)
-                tokens_to_deduct = token_info['incoming_tokens'] + response_tokens
+        # Try to get token counts from API response
+        api_usage = body.get("usage", {})
+        prompt_tokens = api_usage.get("prompt_tokens")
+        completion_tokens = api_usage.get("completion_tokens")
+        total_tokens = api_usage.get("total_tokens")
 
-                if await self.use_tokens(username, tokens_to_deduct):
-                    self.logger.info(f"Deducted {tokens_to_deduct} tokens for user {username}")
-                    self.logger.info(f"Conversation tokens: {token_info['incoming_tokens']}, Response tokens: {response_tokens}")
-                else:
-                    self.logger.warning(f"Failed to deduct {tokens_to_deduct} tokens for user {username}")
+        # If API doesn't provide token counts, use our own counting method
+        if prompt_tokens is None:
+            prompt_tokens = fallback_input_tokens
+            print("Using fallback method for prompt tokens")
+        if completion_tokens is None:
+            completion_tokens = self.count_output_tokens(generated_message, model)
+            print("Using fallback method for completion tokens")
+        if total_tokens is None:
+            total_tokens = prompt_tokens + completion_tokens
+            print("Using fallback method for total tokens")
 
-                # Add token usage information to the response
-                body['token_usage'] = {
-                    'prompt_tokens': token_info['incoming_tokens'],
-                    'completion_tokens': response_tokens,
-                    'total_tokens': tokens_to_deduct
-                }
+        # Deduct tokens
+        tokens_to_deduct = total_tokens
+        if await self.use_tokens(username, tokens_to_deduct):
+            self.logger.info(f"Deducted {tokens_to_deduct} tokens for user {username}")
+        else:
+            self.logger.warning(f"Failed to deduct {tokens_to_deduct} tokens for user {username}")
 
-            except Exception as e:
-                self.logger.error(f"Error deducting tokens for user {username}: {str(e)}")
-                # We don't re-raise the exception here to avoid disrupting the response
-                # But you might want to handle this differently based on your requirements
+        # Add token usage information to the response
+        body['token_usage'] = {
+            'prompt_tokens': prompt_tokens,
+            'completion_tokens': completion_tokens,
+            'total_tokens': total_tokens
+        }
+
+        # Print token information for verification
+        print(f"Model: {model}")
+        print(f"API prompt tokens: {api_usage.get('prompt_tokens', 'Not provided')}")
+        print(f"API completion tokens: {api_usage.get('completion_tokens', 'Not provided')}")
+        print(f"API total tokens: {api_usage.get('total_tokens', 'Not provided')}")
+        print(f"Reported prompt tokens: {prompt_tokens}")
+        print(f"Reported completion tokens: {completion_tokens}")
+        print(f"Reported total tokens: {total_tokens}")
+
+        # Clean up
+        del self.chat_generations[body["chat_id"]]
 
         return body
