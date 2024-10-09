@@ -104,6 +104,12 @@ class Pipeline:
                     raise Exception(f"Your conversation requires {incoming_tokens} tokens, but you only have {user_tokens} available. Please shorten your message or purchase more tokens.")
 
                 self.logger.info(f"User {username} conversation requires {incoming_tokens} tokens. Current balance: {user_tokens}")
+                
+                # Add token information to the body for later use
+                body['__token_info'] = {
+                    'incoming_tokens': incoming_tokens,
+                    'user_tokens': user_tokens
+                }
             
             except Exception as e:
                 self.logger.error(f"Error processing request for user {username}: {str(e)}")
@@ -116,18 +122,19 @@ class Pipeline:
             username = user.get("name", "default_user")
 
             try:
-                # Calculate tokens for the entire conversation, including the new response
-                total_tokens = self.count_tokens(body.get('messages', []))
-                
-                # Calculate tokens for the new response separately
+                token_info = body.pop('__token_info', None)
+                if token_info is None:
+                    raise Exception("Token information not found in body. Make sure inlet() was called before outlet().")
+
+                # Calculate tokens for the new response
                 response_tokens = self.count_output_tokens(body.get('content', ''))
 
                 # Total tokens to deduct
-                tokens_to_deduct = total_tokens
+                tokens_to_deduct = token_info['incoming_tokens'] + response_tokens
 
                 if await self.use_tokens(username, tokens_to_deduct):
                     self.logger.info(f"Deducted {tokens_to_deduct} tokens for user {username}")
-                    self.logger.info(f"Conversation tokens: {total_tokens}, Response tokens: {response_tokens}")
+                    self.logger.info(f"Conversation tokens: {token_info['incoming_tokens']}, Response tokens: {response_tokens}")
                 else:
                     self.logger.warning(f"Failed to deduct {tokens_to_deduct} tokens for user {username}")
             except Exception as e:
