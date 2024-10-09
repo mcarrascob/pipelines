@@ -23,7 +23,7 @@ class Pipeline:
         self.api_url = os.getenv("TOKEN_API_URL", "http://host.docker.internal:8509")
         self.logger = logging.getLogger(__name__)
         self.tokenizer = tiktoken.get_encoding("cl100k_base")
-        self.token_info = {}  # New attribute to store token information
+        self.token_info = {}  # Attribute to store token information
 
     async def on_startup(self):
         print(f"on_startup:{__name__}")
@@ -130,7 +130,7 @@ class Pipeline:
                 # Calculate tokens for the new response
                 response_tokens = self.count_output_tokens(body.get('content', ''))
 
-                # Total tokens to deduct
+                # Total tokens to deduct (incoming + response)
                 tokens_to_deduct = token_info['incoming_tokens'] + response_tokens
 
                 if await self.use_tokens(username, tokens_to_deduct):
@@ -138,6 +138,14 @@ class Pipeline:
                     self.logger.info(f"Conversation tokens: {token_info['incoming_tokens']}, Response tokens: {response_tokens}")
                 else:
                     self.logger.warning(f"Failed to deduct {tokens_to_deduct} tokens for user {username}")
+
+                # Add token usage information to the response
+                body['token_usage'] = {
+                    'prompt_tokens': token_info['incoming_tokens'],
+                    'completion_tokens': response_tokens,
+                    'total_tokens': tokens_to_deduct
+                }
+
             except Exception as e:
                 self.logger.error(f"Error deducting tokens for user {username}: {str(e)}")
                 # We don't re-raise the exception here to avoid disrupting the response
