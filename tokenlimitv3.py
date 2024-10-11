@@ -109,7 +109,7 @@ class Pipeline:
             # If not JSON, count tokens for the raw string
             return len(tokenizer.encode(message))
 
-     async def get_user_info(self, username: str) -> Optional[int]:
+    async def get_user_info(self, username: str) -> Optional[int]:
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.get(f"{self.api_url}/get_tokens?username={username}") as response:
@@ -135,17 +135,8 @@ class Pipeline:
         except aiohttp.ClientConnectorError:
             raise Exception(f"Cannot connect to API at {self.api_url}")
 
-    async def use_tokens(self, username: str, tokens: int) -> bool:
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(f"{self.api_url}/use_tokens", json={"username": username, "tokens": tokens}) as response:
-                    if response.status != 200:
-                        raise Exception(f"Failed to use tokens: {await response.text()}")
-                    return True
-        except aiohttp.ClientConnectorError:
-            raise Exception(f"Cannot connect to API at {self.api_url}")
 
-     async def use_tokens(self, username: str, model: str, tokens: int) -> bool:
+    async def use_tokens(self, username: str, model: str, tokens: int) -> bool:
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post(f"{self.api_url}/use_tokens", json={"username": username, "model": model, "tokens": tokens}) as response:
