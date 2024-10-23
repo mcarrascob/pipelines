@@ -1,4 +1,4 @@
-from typing import List, Optional, Dict
+from typing import List, Optional
 from schemas import OpenAIChatMessage
 import os
 import uuid
@@ -10,35 +10,6 @@ from pydantic import BaseModel
 from langfuse import Langfuse
 from langfuse.api.resources.commons.errors.unauthorized_error import UnauthorizedError
 
-class ModelPricing:
-    def __init__(self):
-        self.pricing = {
-            "gpt-4o-mini": {
-                "input": 0.00015,  # $0.15 per 1M tokens
-                "output": 0.0006,  # $0.60 per 1M tokens
-            }
-        }
-
-    def get_model_cost(self, model: str, input_tokens: int, output_tokens: int) -> Dict[str, float]:
-        model = model.lower()
-        if model not in self.pricing:
-            print(f"Warning: No pricing found for model {model}. Using default pricing.")
-            return {
-                "input_cost": 0,
-                "output_cost": 0,
-                "total_cost": 0
-            }
-        
-        model_pricing = self.pricing[model]
-        input_cost = (input_tokens * model_pricing["input"])
-        output_cost = (output_tokens * model_pricing["output"])
-        total_cost = input_cost + output_cost
-        
-        return {
-            "input_cost": input_cost,
-            "output_cost": output_cost,
-            "total_cost": total_cost
-        }
 
 class Pipeline:
     class Valves(BaseModel):
@@ -62,9 +33,117 @@ class Pipeline:
         self.langfuse = None
         self.chat_generations = {}
         self.tokenizers = {}
-        self.pricing = ModelPricing()
 
-    # ... [Previous methods remain the same until outlet] ...
+    async def on_startup(self):
+        print(f"on_startup:{__name__}")
+        self.set_langfuse()
+
+    async def on_shutdown(self):
+        print(f"on_shutdown:{__name__}")
+        self.langfuse.flush()
+
+    async def on_valves_updated(self):
+        self.set_langfuse()
+
+    def set_langfuse(self):
+        try:
+            self.langfuse = Langfuse(
+                secret_key=self.valves.secret_key,
+                public_key=self.valves.public_key,
+                host=self.valves.host,
+                debug=False,
+            )
+            self.langfuse.auth_check()
+        except UnauthorizedError:
+            print(
+                "Langfuse credentials incorrect. Please re-enter your Langfuse credentials in the pipeline settings."
+            )
+        except Exception as e:
+            print(f"Langfuse error: {e} Please re-enter your Langfuse credentials in the pipeline settings.")
+
+    def get_tokenizer(self, model: str):
+        if model not in self.tokenizers:
+            try:
+                self.tokenizers[model] = tiktoken.encoding_for_model(model)
+            except KeyError:
+                print(f"Warning: Model {model} not found. Using default tokenizer.")
+                self.tokenizers[model] = tiktoken.get_encoding("cl100k_base")
+        return self.tokenizers[model]
+
+    def count_tokens(self, messages: List[dict], model: str) -> int:
+        """Count tokens for a list of messages."""
+        tokenizer = self.get_tokenizer(model)
+        token_count = 0
+        
+        for message in messages:
+            token_count += 4  # Every message follows <im_start>{role/name}\n{content}<im_end>\n
+            for key, value in message.items():
+                token_count += len(tokenizer.encode(str(value)))
+            
+            if "name" in message:  # If there's a name, the role is omitted
+                token_count -= 1  # Role is always required and always 1 token
+
+        token_count += 2  # Every reply is primed with <im_start>assistant
+        
+        # Adjust for the chain of messages
+        if len(messages) > 1:
+            token_count -= 2 * (len(messages) - 1)  # Subtract 2 for each message after the first
+
+        return token_count
+
+    def count_output_tokens(self, message: str, model: str) -> int:
+        """Count tokens for the output message, accounting for potential JSON structure."""
+        tokenizer = self.get_tokenizer(model)
+        try:
+            # Try to parse the message as JSON
+            parsed_message = json.loads(message)
+            # If successful, count tokens for the entire JSON structure
+            return len(tokenizer.encode(json.dumps(parsed_message)))
+        except json.JSONDecodeError:
+            # If not JSON, count tokens for the raw string
+            return len(tokenizer.encode(message))
+
+    async def inlet(self, body: dict, user: Optional[dict] = None) -> dict:
+        print(f"inlet:{__name__}")
+        print(f"Received body: {body}")
+        print(f"User: {user}")
+
+        if "chat_id" not in body:
+            unique_id = f"SYSTEM MESSAGE {uuid.uuid4()}"
+            body["chat_id"] = unique_id
+            print(f"chat_id was missing, set to: {unique_id}")
+
+        required_keys = ["model", "messages"]
+        missing_keys = [key for key in required_keys if key not in body]
+        
+        if missing_keys:
+            error_message = f"Error: Missing keys in the request body: {', '.join(missing_keys)}"
+            print(error_message)
+            raise ValueError(error_message)
+
+        trace = self.langfuse.trace(
+            name=f"filter:{__name__}",
+            input=body,
+            user_id=user["id"] if user else None,
+            metadata={"name": user["name"] if user else None},
+            session_id=body["chat_id"],
+        )
+
+        # Calculate input tokens for all messages
+        input_tokens = self.count_tokens(body["messages"], body["model"])
+
+        generation = trace.generation(
+            name=body["chat_id"],
+            model=body["model"],
+            input=body["messages"],
+            metadata={"interface": "open-webui", "input_tokens": input_tokens},
+        )
+
+        self.chat_generations[body["chat_id"]] = {"generation": generation, "input_tokens": input_tokens, "model": body["model"]}
+        print(f"Calculated input tokens: {input_tokens}")
+        print(trace.get_trace_url())
+
+        return body
 
     async def outlet(self, body: dict, user: Optional[dict] = None) -> dict:
         print(f"outlet:{__name__}")
@@ -80,34 +159,59 @@ class Pipeline:
 
         # Try to get token counts from API response
         api_usage = body.get("usage", {})
-        prompt_tokens = api_usage.get("prompt_tokens", fallback_input_tokens)
-        completion_tokens = api_usage.get("completion_tokens", 
-            self.count_output_tokens(generated_message, model))
-        total_tokens = prompt_tokens + completion_tokens
+        prompt_tokens = api_usage.get("prompt_tokens")
+        completion_tokens = api_usage.get("completion_tokens")
+        total_tokens = api_usage.get("total_tokens")
 
-        # Calculate costs
-        costs = self.pricing.get_model_cost(model, prompt_tokens, completion_tokens)
+        # If API doesn't provide token counts, use our own counting method
+        if prompt_tokens is None:
+            prompt_tokens = fallback_input_tokens
+            print("Using fallback method for prompt tokens")
+        if completion_tokens is None:
+            completion_tokens = self.count_output_tokens(generated_message, model)
+            print("Using fallback method for completion tokens")
+        if total_tokens is None:
+            total_tokens = prompt_tokens + completion_tokens
+            print("Using fallback method for total tokens")
+
+        # Calculate costs for GPT-4o-mini specifically
+        usage_data = {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": total_tokens,
+        }
+
+        if model.lower() in ["gpt-4o-mini", "gpt-4o-mini"]:
+            # Calculate costs based on actual rates
+            input_cost = (prompt_tokens * 0.00015)  # $0.15 per 1M tokens
+            output_cost = (completion_tokens * 0.0006)  # $0.60 per 1M tokens
+            total_cost = input_cost + output_cost
+            
+            # Add cost data to usage
+            usage_data.update({
+                "input_cost": input_cost,
+                "output_cost": output_cost,
+                "total_cost": total_cost
+            })
 
         generation.end(
             output=generated_message,
-            usage={
-                "prompt_tokens": prompt_tokens,
-                "completion_tokens": completion_tokens,
-                "total_tokens": total_tokens,
-                "input_cost": costs["input_cost"],
-                "output_cost": costs["output_cost"],
-                "total_cost": costs["total_cost"]
-            },
-            metadata={
-                "interface": "open-webui",
-                "cost_details": costs
-            },
+            usage=usage_data,
+            metadata={"interface": "open-webui"},
         )
 
-        # Print token and cost information for verification
+        # Print token information for verification
         print(f"Model: {model}")
-        print(f"Prompt tokens: {prompt_tokens} (Cost: ${costs['input_cost']:.6f})")
-        print(f"Completion tokens: {completion_tokens} (Cost: ${costs['output_cost']:.6f})")
-        print(f"Total tokens: {total_tokens} (Total Cost: ${costs['total_cost']:.6f})")
+        print(f"API prompt tokens: {api_usage.get('prompt_tokens', 'Not provided')}")
+        print(f"API completion tokens: {api_usage.get('completion_tokens', 'Not provided')}")
+        print(f"API total tokens: {api_usage.get('total_tokens', 'Not provided')}")
+        print(f"Reported prompt tokens: {prompt_tokens}")
+        print(f"Reported completion tokens: {completion_tokens}")
+        print(f"Reported total tokens: {total_tokens}")
+        
+        if model.lower() in ["gpt-4o-mini", "gpt-4o-mini"]:
+            print(f"Input cost: ${usage_data['input_cost']:.6f}")
+            print(f"Output cost: ${usage_data['output_cost']:.6f}")
+            print(f"Total cost: ${usage_data['total_cost']:.6f}")
 
         return body
