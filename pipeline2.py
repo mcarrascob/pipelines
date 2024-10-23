@@ -183,8 +183,8 @@ class Pipeline:
 
         if model.lower() in ["gpt-4o-mini", "gpt-4o-mini"]:
             # Calculate costs based on actual rates
-            input_cost = (prompt_tokens * 0.00015)  # $0.15 per 1M tokens
-            output_cost = (completion_tokens * 0.0006)  # $0.60 per 1M tokens
+            input_cost = (prompt_tokens * 0.00000015)  # $0.15 per 1M tokens
+            output_cost = (completion_tokens * 0.0000006)  # $0.60 per 1M tokens
             total_cost = input_cost + output_cost
             
             # Add cost data to usage
