@@ -2,14 +2,13 @@
 title: Personal Information Filter Pipeline
 author: modified from open-webui
 date: 2024-05-30
-version: 1.3
+version: 1.4
 license: MIT
 description: Filter pipeline that prevents sending personal information to the OpenAI API with user notifications
 requirements: requests, re
 """
 from typing import List, Optional, Dict, Tuple
 from pydantic import BaseModel
-from schemas import OpenAIChatMessage
 import re
 import os
 
@@ -41,6 +40,9 @@ class PersonalInfoFilter:
 
     def check_personal_info(self, text: str) -> Tuple[bool, Optional[str]]:
         """Check if text contains personal information and return type if found."""
+        if not isinstance(text, str):
+            return False, None
+            
         for info_type, pattern in self.patterns.items():
             if re.search(pattern, text):
                 return True, info_type
@@ -52,9 +54,11 @@ class Pipeline:
         priority: int = 0
         enable_logging: bool = False
         strict_mode: bool = True
+        admin_check: bool = True  # New parameter to control admin checking
 
     class SpanishErrors:
         GENERAL_ERROR = "Se ha detectado información personal sensible en su mensaje. Por favor, revise y elimine cualquier dato personal antes de enviarlo."
+        INVALID_MESSAGE = "El formato del mensaje no es válido. Por favor, asegúrese de que el mensaje contiene texto válido."
 
     def __init__(self):
         self.type = "filter"
@@ -63,7 +67,8 @@ class Pipeline:
             **{
                 "pipelines": os.getenv("PERSONAL_INFO_PIPELINES", "*").split(","),
                 "enable_logging": bool(os.getenv("PERSONAL_INFO_LOGGING", False)),
-                "strict_mode": bool(os.getenv("PERSONAL_INFO_STRICT_MODE", True))
+                "strict_mode": bool(os.getenv("PERSONAL_INFO_STRICT_MODE", True)),
+                "admin_check": bool(os.getenv("PERSONAL_INFO_ADMIN_CHECK", True))
             }
         )
         self.personal_info_filter = PersonalInfoFilter()
@@ -76,20 +81,36 @@ class Pipeline:
         print(f"Shutting down Personal Information Filter Pipeline")
         pass
 
-    def _check_messages(self, messages: List[OpenAIChatMessage]) -> Tuple[bool, Optional[str]]:
+    def _check_message_content(self, message: dict) -> Tuple[bool, Optional[str]]:
+        """Check a single message for personal information."""
+        if not isinstance(message, dict):
+            return False, None
+
+        content = message.get('content', '')
+        if content:
+            return self.personal_info_filter.check_personal_info(content)
+        return False, None
+
+    def _check_messages(self, messages: List[dict]) -> Tuple[bool, Optional[str]]:
         """Check messages for personal information."""
+        if not isinstance(messages, list):
+            return False, None
+
         for message in messages:
-            if message.content:
-                has_personal_info, info_type = self.personal_info_filter.check_personal_info(message.content)
-                if has_personal_info:
-                    return True, info_type
+            has_personal_info, info_type = self._check_message_content(message)
+            if has_personal_info:
+                return True, info_type
         return False, None
 
     async def inlet(self, body: dict, user: Optional[dict] = None) -> dict:
         """Filter personal information from the request body."""
         print(f"Processing request through Personal Information Filter")
 
-        if user and user.get("role", "admin") == "user":
+        # Skip checks if user is admin and admin_check is False
+        if not self.valves.admin_check and user and user.get("role") == "admin":
+            return body
+
+        try:
             # Check messages for personal information
             if "messages" in body:
                 has_personal_info, info_type = self._check_messages(body["messages"])
@@ -101,8 +122,8 @@ class Pipeline:
                     raise Exception(error_message)
 
             # Check prompt for personal information
-            if "prompt" in body and isinstance(body["prompt"], str):
-                has_personal_info, info_type = self.personal_info_filter.check_personal_info(body["prompt"])
+            if "prompt" in body:
+                has_personal_info, info_type = self.personal_info_filter.check_personal_info(str(body["prompt"]))
                 if has_personal_info:
                     error_message = (
                         self.personal_info_filter.error_messages.get(info_type, 
@@ -113,4 +134,14 @@ class Pipeline:
             if self.valves.enable_logging:
                 print(f"Processed request body: {body}")
 
-        return body
+            return body
+
+        except Exception as e:
+            if self.valves.enable_logging:
+                print(f"Error processing request: {str(e)}")
+            raise Exception(str(e))
+
+    def log_message(self, message: str):
+        """Log a message if logging is enabled."""
+        if self.valves.enable_logging:
+            print(f"Personal Info Filter: {message}")
