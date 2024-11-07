@@ -21,9 +21,8 @@ class Pipeline:
         RATE_LIMIT_MINUTE = "Se ha excedido el límite de solicitudes por minuto. Por favor, espere un momento antes de intentar nuevamente."
         RATE_LIMIT_HOUR = "Se ha excedido el límite de solicitudes por hora. Por favor, inténtelo más tarde."
         RATE_LIMIT_WINDOW = "Se ha excedido el límite de solicitudes en ventana de tiempo. Por favor, espere unos minutos."
-        TOKEN_LIMIT = "La conversación alcanzaría aproximadamente {} tokens con este mensaje, superando el límite de {} tokens.\nPor favor:\n- Inicie una nueva conversación\n- O elimine algunos mensajes anteriores\n- O divida su mensaje en partes más pequeñas"
+        TOKEN_LIMIT = "La conversación tiene {} tokens, superando el límite de {} tokens. Por favor, inicie una nueva conversación."
         MISSING_KEYS = "Error: Faltan campos requeridos en la solicitud: {}"
-        MODEL_ERROR = "Error: El modelo especificado no es válido o no está soportado."
 
     def __init__(self):
         self.type = "filter"
@@ -43,8 +42,6 @@ class Pipeline:
         self.user_requests = {}
         self.tokenizers = {}
         self.logger = logging.getLogger(__name__)
-        # Dictionary to store conversation histories and their token counts
-        self.conversation_tokens = {}
 
     def get_tokenizer(self, model: str):
         """Get the appropriate tokenizer for the model."""
@@ -55,16 +52,6 @@ class Pipeline:
                 self.logger.warning(f"Model {model} not found. Using default tokenizer.")
                 self.tokenizers[model] = tiktoken.get_encoding("cl100k_base")
         return self.tokenizers[model]
-
-    def estimate_response_tokens(self, model: str) -> int:
-        """Estimate the number of tokens the model might use in its response."""
-        # Conservative estimates based on common model behavior
-        model_estimates = {
-            "gpt-4": 1000,           # Estimate for GPT-4
-            "gpt-3.5-turbo": 500,    # Estimate for GPT-3.5
-            "default": 800           # Default estimate
-        }
-        return model_estimates.get(model, model_estimates["default"])
 
     def count_tokens(self, messages: List[dict], model: str) -> int:
         """Count tokens for a list of messages."""
@@ -84,19 +71,9 @@ class Pipeline:
         
         # Adjust for the chain of messages
         if len(messages) > 1:
-            token_count -= 2 * (len(messages) - 1)  # Subtract 2 for each message after the first
+            token_count -= 2 * (len(messages) - 1)
 
         return token_count
-
-    def get_conversation_token_count(self, messages: List[dict], model: str) -> tuple[int, int]:
-        """
-        Get the current token count and estimated total after response
-        Returns: (current_tokens, estimated_total_tokens)
-        """
-        current_tokens = self.count_tokens(messages, model)
-        estimated_response_tokens = self.estimate_response_tokens(model)
-        estimated_total = current_tokens + estimated_response_tokens
-        return current_tokens, estimated_total
 
     def rate_limited(self, user_id: str) -> tuple[bool, Optional[str]]:
         """Check if a user is rate limited and return the type of limit if exceeded."""
@@ -135,62 +112,45 @@ class Pipeline:
         print(f"Received body: {body}")
         print(f"User: {user}")
 
-        # Ensure chat_id exists
-        if "chat_id" not in body:
-            unique_id = f"SYSTEM MESSAGE {uuid.uuid4()}"
-            body["chat_id"] = unique_id
-            print(f"chat_id was missing, set to: {unique_id}")
-
-        # Verify required fields
+        # Verify required fields first
         required_keys = ["model", "messages"]
         missing_keys = [key for key in required_keys if key not in body]
-        
         if missing_keys:
             error_message = self.SpanishErrors.MISSING_KEYS.format(", ".join(missing_keys))
             self.logger.error(error_message)
             raise ValueError(error_message)
 
+        # Ensure chat_id exists
+        if "chat_id" not in body:
+            body["chat_id"] = f"SYSTEM MESSAGE {uuid.uuid4()}"
+
         if user and user.get("role") in self.valves.target_user_roles:
             user_id = user["id"] if user and "id" in user else "default_user"
-            
-            # Check rate limits
-            is_limited, limit_type = self.rate_limited(user_id)
-            if is_limited:
-                error_message = self.get_rate_limit_error(limit_type)
-                raise Exception(error_message)
 
             try:
-                # Calculate current tokens and estimate total after response
-                current_tokens, estimated_total = self.get_conversation_token_count(
-                    body["messages"], 
-                    body["model"]
-                )
-                
-                # Log token counts for debugging
-                self.logger.info(f"Current tokens: {current_tokens}")
-                self.logger.info(f"Estimated total after response: {estimated_total}")
-                
-                # Check if estimated total would exceed limit
-                if estimated_total > self.valves.max_input_tokens:
+                # 1. First check total tokens in conversation
+                total_tokens = self.count_tokens(body["messages"], body["model"])
+                self.logger.info(f"Total tokens in conversation: {total_tokens}")
+
+                if total_tokens > self.valves.max_input_tokens:
                     error_message = self.SpanishErrors.TOKEN_LIMIT.format(
-                        estimated_total,
+                        total_tokens,
                         self.valves.max_input_tokens
                     )
                     raise Exception(error_message)
 
-                # Store conversation token count
-                self.conversation_tokens[body["chat_id"]] = {
-                    "current_tokens": current_tokens,
-                    "model": body["model"]
-                }
+                # 2. Then check rate limits
+                is_limited, limit_type = self.rate_limited(user_id)
+                if is_limited:
+                    error_message = self.get_rate_limit_error(limit_type)
+                    raise Exception(error_message)
 
-                self.logger.info(f"User {user_id} conversation current tokens: {current_tokens}")
+                # 3. If all checks pass, log the request
+                self.log_request(user_id)
                 
             except Exception as e:
                 self.logger.error(f"Error processing request for user {user_id}: {str(e)}")
                 raise
-
-            self.log_request(user_id)
 
         return body
 
