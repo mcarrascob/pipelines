@@ -19,7 +19,7 @@ class Pipeline:
         RATE_LIMIT_MINUTE = "Límite de solicitudes por minuto excedido. Por favor, espere un momento antes de intentar nuevamente."
         RATE_LIMIT_HOUR = "Límite de solicitudes por hora excedido. Por favor, inténtelo más tarde."
         RATE_LIMIT_WINDOW = "Límite de solicitudes en ventana de tiempo excedido. Por favor, espere unos minutos."
-        TOKEN_LIMIT = "El mensaje excede el límite de tokens permitido ({} tokens). El límite máximo es de {} tokens."
+        TOKEN_LIMIT = "La conversación ha excedido el límite de tokens permitido.\nTokens actuales: {}\nLímite máximo: {}\nPor favor, inicie una nueva conversación o elimine algunos mensajes anteriores."
 
     def __init__(self):
         self.type = "filter"
@@ -47,24 +47,47 @@ class Pipeline:
         )
 
         self.user_requests = {}
-        self.tokenizer = tiktoken.get_encoding("cl100k_base")  # Default OpenAI encoding
+        # Initialize tokenizer - using cl100k_base which is used by gpt-4 and gpt-3.5-turbo
+        self.tokenizer = tiktoken.get_encoding("cl100k_base")
 
-    def count_tokens(self, messages: List[OpenAIChatMessage]) -> int:
-        """Count the number of tokens in the input messages."""
+    def count_message_tokens(self, message: dict) -> int:
+        """
+        Count tokens for a single message.
+        Follows OpenAI's token counting method for chat messages.
+        """
+        num_tokens = 0
+        
+        # Every message starts with im_start, role, content, im_end, adding 4 tokens
+        num_tokens += 4
+        
+        # Count tokens in the role
+        if "role" in message:
+            num_tokens += len(self.tokenizer.encode(message["role"]))
+            
+        # Count tokens in the content
+        if "content" in message and message["content"]:
+            num_tokens += len(self.tokenizer.encode(message["content"]))
+            
+        # Count tokens in the name if present
+        if "name" in message:
+            num_tokens += len(self.tokenizer.encode(message["name"]))
+            
+        return num_tokens
+
+    def count_total_tokens(self, messages: List[dict]) -> int:
+        """
+        Count the total number of tokens in all messages.
+        """
         total_tokens = 0
+        
+        # Add tokens for each message
         for message in messages:
-            # Count tokens in the content
-            if message.content:
-                total_tokens += len(self.tokenizer.encode(message.content))
-            # Count tokens in the role (system, user, assistant)
-            if message.role:
-                total_tokens += len(self.tokenizer.encode(message.role))
+            total_tokens += self.count_message_tokens(message)
+            
+        # Add 2 tokens for conversation overhead
+        total_tokens += 2
+        
         return total_tokens
-
-    def check_token_limit(self, messages: List[OpenAIChatMessage]) -> tuple[bool, int]:
-        """Check if the input messages exceed the token limit."""
-        token_count = self.count_tokens(messages)
-        return token_count > self.valves.max_input_tokens, token_count
 
     def get_rate_limit_error(self, limit_type: str) -> str:
         """Get the appropriate Spanish error message for the rate limit type."""
@@ -112,12 +135,13 @@ class Pipeline:
                 error_message = self.get_rate_limit_error(limit_type)
                 raise Exception(error_message)
 
-            # Check token limits
+            # Check token limits for all messages in the conversation
             if "messages" in body:
-                exceeds_limit, token_count = self.check_token_limit(body["messages"])
-                if exceeds_limit:
+                total_tokens = self.count_total_tokens(body["messages"])
+                
+                if total_tokens > self.valves.max_input_tokens:
                     error_message = self.SpanishErrors.TOKEN_LIMIT.format(
-                        token_count, 
+                        total_tokens,
                         self.valves.max_input_tokens
                     )
                     raise Exception(error_message)
@@ -126,7 +150,6 @@ class Pipeline:
 
         return body
 
-    # ... (keeping the existing prune_requests and log_request methods unchanged)
     def prune_requests(self, user_id: str):
         """Prune old requests that are outside of the sliding window period."""
         now = time.time()
