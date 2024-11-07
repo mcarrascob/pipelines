@@ -29,104 +29,105 @@ class Pipeline:
         self.logger = logging.getLogger(__name__)
 
     def is_code_block(self, text: str) -> bool:
-        """Check if the content is within a code block."""
+        """Check if the content is within a code block or is code-related."""
         # Check for markdown code blocks (both ``` and ~~~)
-        markdown_code = bool(re.search(r'```[\s\S]*?```|~~~[\s\S]*?~~~', text))
+        if re.search(r'```[\s\S]*?```|~~~[\s\S]*?~~~', text):
+            return True
+            
         # Check for HTML code tags
-        html_code = bool(re.search(r'<code>[\s\S]*?</code>', text))
-        # Check for common code file extensions
-        file_extension = bool(re.search(r'\.(js|html|css|jsx|tsx|vue|svelte)$', text))
-        return markdown_code or html_code or file_extension
+        if re.search(r'<code>[\s\S]*?</code>', text):
+            return True
+            
+        # Check for HTML elements that indicate code
+        if re.search(r'<script>|<style>|<html>|<!DOCTYPE|<head>|<body>|</html>|</script>|</style>', text):
+            return True
+            
+        # Check for common programming patterns
+        code_patterns = [
+            r'function\s+\w+\s*\(',  # Function declarations
+            r'const\s+\w+\s*=',      # Const declarations
+            r'let\s+\w+\s*=',        # Let declarations
+            r'var\s+\w+\s*=',        # Var declarations
+            r'class\s+\w+',          # Class declarations
+            r'import\s+.*from',      # Import statements
+            r'export\s+default',     # Export statements
+            r'{\s*[\w\s,:"\']+\s*}', # Object literals
+            r'#\w+\s*{',            # CSS selectors
+            r'\.\w+\s*{',           # CSS class selectors
+            r'@media',              # CSS media queries
+            r'<\w+>[\s\S]*</\w+>'   # HTML tags
+        ]
+        
+        return any(re.search(pattern, text) for pattern in code_patterns)
 
     def check_for_file_content(self, content: str) -> tuple[bool, str]:
         """
         Check if the content contains actual file upload attempts.
         Returns (is_file_content, message).
         """
+        # First check if it's code
         if self.is_code_block(content):
             return False, ""
 
-        # Document and file extensions to block
+        # Document and file extensions to block (only when they appear as actual files)
         blocked_extensions = [
             # Documents
-            ".pdf", ".doc", ".docx", ".rtf", ".txt", ".odt",
+            ".pdf", ".doc", ".docx", ".rtf", ".odt",
             # Spreadsheets
             ".xls", ".xlsx", ".csv", ".ods",
             # Presentations
             ".ppt", ".pptx", ".odp",
-            # Images
-            ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".svg", ".ico",
             # Archives
             ".zip", ".rar", ".7z", ".tar", ".gz",
-            # Data files
-            ".json", ".xml", ".yaml", ".yml", ".ini", ".config",
             # Database files
             ".db", ".sqlite", ".sql",
-            # Other common files
-            ".md", ".markdown", ".log", ".dat"
+            # Others
+            ".exe", ".bin", ".dat"
         ]
 
-        # File upload and handling patterns
+        # File upload and handling patterns that indicate actual file uploads
         file_patterns = [
             # Data URIs
             "base64,",
-            "data:image/",
             "data:application/",
-            "data:text/",
             
-            # File input and form patterns
+            # File input patterns
             "input type=\"file\"",
-            "accept=\"",
-            "enctype=\"multipart",
-            "multipart/form-data",
+            "accept=\"application/",
+            "enctype=\"multipart/form-data\"",
             
             # File API patterns
-            "FileReader(",
-            "new Blob(",
-            "new File(",
-            "FormData(",
-            "createObjectURL(",
-            
-            # Common file handling terms
-            "upload",
-            "download",
-            "archivo adjunto",
-            "adjuntar archivo",
-            "subir archivo",
-            "cargar archivo",
-            
-            # Document-specific patterns
-            "application/pdf",
-            "application/msword",
-            "application/vnd.ms-excel",
-            "application/vnd.openxmlformats",
-            "text/plain",
-            "spreadsheet",
-            "workbook",
-            "document",
+            "new FileReader(",
+            "new File([",
+            "new Blob([",
             
             # Binary data patterns
             "%PDF-",  # PDF header
             "PK\x03\x04",  # ZIP header
-            "\xFF\xD8\xFF",  # JPEG header
-            "\x89PNG",  # PNG header
         ]
         
-        # Check for blocked file extensions
+        # Check for blocked file extensions in a way that indicates actual files
         for ext in blocked_extensions:
-            if ext.lower() in content.lower():
-                if "." + ext.lower() in content.lower():  # Make sure it's actually an extension
+            # Look for patterns that suggest actual file uploads, not just mentions
+            file_patterns = [
+                f"filename=\"*{ext}\"",
+                f"uploadFile*{ext}",
+                f"download*{ext}",
+                f"archivo*{ext}",
+            ]
+            for pattern in file_patterns:
+                if pattern.lower() in content.lower():
                     return True, self.SpanishErrors.DOCUMENT_DETECTED
 
         # Check for file upload patterns
         for pattern in file_patterns:
-            if pattern.lower() in content.lower():
+            if pattern in content:
                 return True, self.SpanishErrors.FILE_DETECTED
 
-        # Check for URLs but don't block them
+        # Check for URLs
         url_patterns = ["http://", "https://"]
         for pattern in url_patterns:
-            if pattern.lower() in content.lower():
+            if pattern in content:
                 return False, self.SpanishErrors.URL_WARNING
 
         return False, ""
@@ -139,38 +140,21 @@ class Pipeline:
         if self.is_code_block(content):
             return False, ""
 
-        # File manipulation functions and patterns
+        # Only check for actual file manipulation functions, not code examples
         file_functions = [
-            # Node.js/filesystem
-            "fs.read", "fs.write", "readFile", "writeFile",
-            "readFileSync", "writeFileSync", "appendFile", "appendFileSync",
-            
-            # Browser file APIs
-            "FileReader", "Blob", "File.createObjectURL",
-            "uploadFile", "downloadFile", "saveAs",
-            
-            # File system operations
-            "mkdir", "readdir", "unlink", "rename",
-            "copyFile", "createReadStream", "createWriteStream",
-            
-            # Database file operations
-            "open(", ".open(", "sqlite3.open",
-            
-            # File manipulation
-            "file.save", "file.write", "file.read",
-            "saveFile", "loadFile", "parseFile",
-            
-            # File upload/download functions
-            "upload.", "download.", "attachment.",
-            "uploadToServer", "downloadFromServer",
-            
-            # Document handling
-            "PDFDocument", "ExcelWorkbook", "WordDocument",
-            "Spreadsheet", "Workbook", "Document"
+            # Actual file operations
+            "new FileReader(",
+            "createObjectURL(",
+            "uploadFile(",
+            "downloadFile(",
+            "saveAs(",
+            "readAsDataURL(",
+            "readAsBinaryString(",
         ]
         
         for func in file_functions:
-            if func.lower() in content.lower():
+            # Look for patterns that suggest actual file operations
+            if func in content and not self.is_code_block(content):
                 return True, self.SpanishErrors.FILE_IN_FUNCTION
 
         return False, ""
