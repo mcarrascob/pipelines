@@ -1,9 +1,10 @@
 import os
-from typing import List, Optional
+from typing import List, Optional, Dict
 from pydantic import BaseModel
-from schemas import OpenAIChatMessage
-import time
 import tiktoken
+import time
+import logging
+import uuid
 
 class Pipeline:
     class Valves(BaseModel):
@@ -14,12 +15,15 @@ class Pipeline:
         sliding_window_limit: Optional[int] = None
         sliding_window_minutes: Optional[int] = None
         max_input_tokens: Optional[int] = None
+        target_user_roles: List[str] = ["user"]
 
     class SpanishErrors:
-        RATE_LIMIT_MINUTE = "Límite de solicitudes por minuto excedido. Por favor, espere un momento antes de intentar nuevamente."
-        RATE_LIMIT_HOUR = "Límite de solicitudes por hora excedido. Por favor, inténtelo más tarde."
-        RATE_LIMIT_WINDOW = "Límite de solicitudes en ventana de tiempo excedido. Por favor, espere unos minutos."
-        TOKEN_LIMIT = "La conversación ha excedido el límite de tokens permitido.\nTokens actuales: {}\nLímite máximo: {}\nPor favor, inicie una nueva conversación o elimine algunos mensajes anteriores."
+        RATE_LIMIT_MINUTE = "Se ha excedido el límite de solicitudes por minuto. Por favor, espere un momento antes de intentar nuevamente."
+        RATE_LIMIT_HOUR = "Se ha excedido el límite de solicitudes por hora. Por favor, inténtelo más tarde."
+        RATE_LIMIT_WINDOW = "Se ha excedido el límite de solicitudes en ventana de tiempo. Por favor, espere unos minutos."
+        TOKEN_LIMIT = "La conversación requiere {} tokens, pero el límite es de {} tokens. Por favor, acorte su mensaje o divídalo en partes más pequeñas."
+        MISSING_KEYS = "Error: Faltan campos requeridos en la solicitud: {}"
+        MODEL_ERROR = "Error: El modelo especificado no es válido o no está soportado."
 
     def __init__(self):
         self.type = "filter"
@@ -28,75 +32,49 @@ class Pipeline:
         self.valves = self.Valves(
             **{
                 "pipelines": os.getenv("RATE_LIMIT_PIPELINES", "*").split(","),
-                "requests_per_minute": int(
-                    os.getenv("RATE_LIMIT_REQUESTS_PER_MINUTE", 10)
-                ),
-                "requests_per_hour": int(
-                    os.getenv("RATE_LIMIT_REQUESTS_PER_HOUR", 1000)
-                ),
-                "sliding_window_limit": int(
-                    os.getenv("RATE_LIMIT_SLIDING_WINDOW_LIMIT", 100)
-                ),
-                "sliding_window_minutes": int(
-                    os.getenv("RATE_LIMIT_SLIDING_WINDOW_MINUTES", 15)
-                ),
-                "max_input_tokens": int(
-                    os.getenv("MAX_INPUT_TOKENS", 10000)
-                ),
+                "requests_per_minute": int(os.getenv("RATE_LIMIT_REQUESTS_PER_MINUTE", 10)),
+                "requests_per_hour": int(os.getenv("RATE_LIMIT_REQUESTS_PER_HOUR", 1000)),
+                "sliding_window_limit": int(os.getenv("RATE_LIMIT_SLIDING_WINDOW_LIMIT", 100)),
+                "sliding_window_minutes": int(os.getenv("RATE_LIMIT_SLIDING_WINDOW_MINUTES", 15)),
+                "max_input_tokens": int(os.getenv("MAX_INPUT_TOKENS", 10000)),
             }
         )
 
         self.user_requests = {}
-        # Initialize tokenizer - using cl100k_base which is used by gpt-4 and gpt-3.5-turbo
-        self.tokenizer = tiktoken.get_encoding("cl100k_base")
+        self.tokenizers = {}
+        self.logger = logging.getLogger(__name__)
+        self.chat_tokens = {}
 
-    def count_message_tokens(self, message: dict) -> int:
-        """
-        Count tokens for a single message.
-        Follows OpenAI's token counting method for chat messages.
-        """
-        num_tokens = 0
-        
-        # Every message starts with im_start, role, content, im_end, adding 4 tokens
-        num_tokens += 4
-        
-        # Count tokens in the role
-        if "role" in message:
-            num_tokens += len(self.tokenizer.encode(message["role"]))
-            
-        # Count tokens in the content
-        if "content" in message and message["content"]:
-            num_tokens += len(self.tokenizer.encode(message["content"]))
-            
-        # Count tokens in the name if present
-        if "name" in message:
-            num_tokens += len(self.tokenizer.encode(message["name"]))
-            
-        return num_tokens
+    def get_tokenizer(self, model: str):
+        """Get the appropriate tokenizer for the model."""
+        if model not in self.tokenizers:
+            try:
+                self.tokenizers[model] = tiktoken.encoding_for_model(model)
+            except KeyError:
+                self.logger.warning(f"Model {model} not found. Using default tokenizer.")
+                self.tokenizers[model] = tiktoken.get_encoding("cl100k_base")
+        return self.tokenizers[model]
 
-    def count_total_tokens(self, messages: List[dict]) -> int:
-        """
-        Count the total number of tokens in all messages.
-        """
-        total_tokens = 0
+    def count_tokens(self, messages: List[dict], model: str) -> int:
+        """Count tokens for a list of messages."""
+        tokenizer = self.get_tokenizer(model)
+        token_count = 0
         
-        # Add tokens for each message
         for message in messages:
-            total_tokens += self.count_message_tokens(message)
+            token_count += 4  # Every message follows <im_start>{role/name}\n{content}<im_end>\n
+            for key, value in message.items():
+                token_count += len(tokenizer.encode(str(value)))
             
-        # Add 2 tokens for conversation overhead
-        total_tokens += 2
-        
-        return total_tokens
+            if "name" in message:  # If there's a name, the role is omitted
+                token_count -= 1  # Role is always required and always 1 token
 
-    def get_rate_limit_error(self, limit_type: str) -> str:
-        """Get the appropriate Spanish error message for the rate limit type."""
-        if limit_type == "minute":
-            return self.SpanishErrors.RATE_LIMIT_MINUTE
-        elif limit_type == "hour":
-            return self.SpanishErrors.RATE_LIMIT_HOUR
-        else:
-            return self.SpanishErrors.RATE_LIMIT_WINDOW
+        token_count += 2  # Every reply is primed with <im_start>assistant
+        
+        # Adjust for the chain of messages
+        if len(messages) > 1:
+            token_count -= 2 * (len(messages) - 1)  # Subtract 2 for each message after the first
+
+        return token_count
 
     def rate_limited(self, user_id: str) -> tuple[bool, Optional[str]]:
         """Check if a user is rate limited and return the type of limit if exceeded."""
@@ -121,12 +99,36 @@ class Pipeline:
 
         return False, None
 
-    async def inlet(self, body: dict, user: Optional[dict] = None) -> dict:
-        print(f"pipe:{__name__}")
-        print(body)
-        print(user)
+    def get_rate_limit_error(self, limit_type: str) -> str:
+        """Get the appropriate Spanish error message for the rate limit type."""
+        if limit_type == "minute":
+            return self.SpanishErrors.RATE_LIMIT_MINUTE
+        elif limit_type == "hour":
+            return self.SpanishErrors.RATE_LIMIT_HOUR
+        else:
+            return self.SpanishErrors.RATE_LIMIT_WINDOW
 
-        if user.get("role", "admin") == "user":
+    async def inlet(self, body: dict, user: Optional[dict] = None) -> dict:
+        print(f"inlet:{__name__}")
+        print(f"Received body: {body}")
+        print(f"User: {user}")
+
+        # Ensure chat_id exists
+        if "chat_id" not in body:
+            unique_id = f"SYSTEM MESSAGE {uuid.uuid4()}"
+            body["chat_id"] = unique_id
+            print(f"chat_id was missing, set to: {unique_id}")
+
+        # Verify required fields
+        required_keys = ["model", "messages"]
+        missing_keys = [key for key in required_keys if key not in body]
+        
+        if missing_keys:
+            error_message = self.SpanishErrors.MISSING_KEYS.format(", ".join(missing_keys))
+            self.logger.error(error_message)
+            raise ValueError(error_message)
+
+        if user and user.get("role") in self.valves.target_user_roles:
             user_id = user["id"] if user and "id" in user else "default_user"
             
             # Check rate limits
@@ -135,16 +137,28 @@ class Pipeline:
                 error_message = self.get_rate_limit_error(limit_type)
                 raise Exception(error_message)
 
-            # Check token limits for all messages in the conversation
-            if "messages" in body:
-                total_tokens = self.count_total_tokens(body["messages"])
+            try:
+                # Calculate tokens for the entire conversation context
+                input_tokens = self.count_tokens(body["messages"], body["model"])
                 
-                if total_tokens > self.valves.max_input_tokens:
+                if input_tokens > self.valves.max_input_tokens:
                     error_message = self.SpanishErrors.TOKEN_LIMIT.format(
-                        total_tokens,
+                        input_tokens,
                         self.valves.max_input_tokens
                     )
                     raise Exception(error_message)
+
+                # Store token information
+                self.chat_tokens[body["chat_id"]] = {
+                    "input_tokens": input_tokens,
+                    "model": body["model"]
+                }
+
+                self.logger.info(f"User {user_id} conversation requires {input_tokens} tokens")
+                
+            except Exception as e:
+                self.logger.error(f"Error processing request for user {user_id}: {str(e)}")
+                raise
 
             self.log_request(user_id)
 
