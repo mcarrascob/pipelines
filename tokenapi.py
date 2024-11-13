@@ -20,7 +20,7 @@ class Pipeline:
             }
         )
         self.tokenizer = tiktoken.get_encoding("cl100k_base")
-        self.api_url = os.getenv("TOKEN_API_URL", "http://host.docker.internal:8509")
+        self.api_url = os.getenv("TOKEN_API_URL", "http://host.docker.internal:8519")
         self.logger = logging.getLogger(__name__)
 
     async def on_startup(self):
