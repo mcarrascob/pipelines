@@ -41,13 +41,9 @@ class Pipeline:
 
     def initialize_clients(self):
         try:
-            # Create a boto3 session using the default credential provider chain
             session = boto3.Session(region_name=self.valves.AWS_REGION_NAME)
-
             self.bedrock = session.client('bedrock')
             self.bedrock_runtime = session.client('bedrock-runtime')
-            
-            # Test the connection by trying to list models
             self.pipelines = self.get_models()
             logger.info("Successfully initialized AWS clients using IAM role.")
         except NoCredentialsError:
@@ -89,17 +85,25 @@ class Pipeline:
         try:
             processed_messages = self.process_messages(messages)
             
+            # Create the base payload according to Bedrock's expected format
             payload = {
                 "anthropic_version": "bedrock-2023-05-31",
-                "max_tokens": body.get("max_tokens", 4096),
-                "temperature": body.get("temperature", 0.7),
-                "top_k": body.get("top_k", 250),
-                "top_p": body.get("top_p", 1),
-                "stop_sequences": body.get("stop", []),
-                "stream": body.get("stream", False),
                 "messages": processed_messages,
             }
 
+            # Add optional parameters if they exist in body
+            if "max_tokens" in body:
+                payload["max_tokens"] = body["max_tokens"]
+            if "temperature" in body:
+                payload["temperature"] = body["temperature"]
+            if "top_k" in body:
+                payload["top_k"] = body["top_k"]
+            if "top_p" in body:
+                payload["top_p"] = body["top_p"]
+            if "stop" in body and body["stop"]:
+                payload["stop_sequences"] = body["stop"]
+
+            # Handle streaming based on body parameter
             if body.get("stream", False):
                 return self.stream_response(model_id, payload)
             else:
@@ -112,7 +116,7 @@ class Pipeline:
         processed_messages = []
         for message in messages:
             if message["role"] == "system":
-                continue  # Skip system messages as they're handled separately in Claude v2
+                continue
             processed_messages.append({
                 "role": message["role"],
                 "content": message.get("content", "")
