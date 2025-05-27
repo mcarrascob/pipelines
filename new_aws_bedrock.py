@@ -1,32 +1,22 @@
 """
-title: AWS Bedrock Claude Pipeline
-author: Modified from G-mario's version
-date: 2024-04-29
-version: 1.1
+title: Anthropic Manifold Pipeline
+author: justinh-rahb, sriparashiva
+date: 2024-06-20
+version: 1.4
 license: MIT
-description: A pipeline for generating text and processing images using the AWS Bedrock API (By Anthropic claude) with IAM role-based authentication.
-requirements: requests, boto3
-environment_variables: AWS_REGION_NAME
+description: A pipeline for generating text and processing images using the Anthropic API.
+requirements: requests, sseclient-py
+environment_variables: ANTHROPIC_API_KEY, ANTHROPIC_THINKING_BUDGET_TOKENS, ANTHROPIC_ENABLE_THINKING
 """
-import base64
-import json
-import logging
-from io import BytesIO
-from typing import List, Union, Generator, Iterator, Optional, Any
-
-import boto3
-from botocore.exceptions import ClientError, NoCredentialsError
-
-from pydantic import BaseModel
 
 import os
 import requests
+import json
+from typing import List, Union, Generator, Iterator
+from pydantic import BaseModel
+import sseclient
 
 from utils.pipelines.main import pop_system_message
-
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
 REASONING_EFFORT_BUDGET_TOKEN_MAP = {
     "none": None,
@@ -42,132 +32,140 @@ MAX_COMBINED_TOKENS = 64000
 
 class Pipeline:
     class Valves(BaseModel):
-        AWS_REGION_NAME: str = ""
+        ANTHROPIC_API_KEY: str = ""
 
     def __init__(self):
         self.type = "manifold"
-        self.name = "Bedrock: "
+        self.id = "anthropic"
+        self.name = "anthropic/"
 
         self.valves = self.Valves(
-            AWS_REGION_NAME=os.getenv(
-                "AWS_REGION_NAME", 
-                os.getenv("AWS_REGION", 
-                         os.getenv("AWS_DEFAULT_REGION", "us-east-1")
-                )
-            )
+            **{
+                "ANTHROPIC_API_KEY": os.getenv(
+                    "ANTHROPIC_API_KEY", "your-api-key-here"
+                ),
+            }
         )
+        self.url = "https://api.anthropic.com/v1/messages"
+        self.update_headers()
 
-        self.bedrock = None
-        self.bedrock_runtime = None
-        self.pipelines = []
-        
-        self.update_pipelines()
+    def update_headers(self):
+        self.headers = {
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+            "x-api-key": self.valves.ANTHROPIC_API_KEY,
+        }
+
+    def get_anthropic_models(self):
+        return [
+            {"id": "claude-3-haiku-20240307", "name": "claude-3-haiku"},
+            {"id": "claude-3-opus-20240229", "name": "claude-3-opus"},
+            {"id": "claude-3-sonnet-20240229", "name": "claude-3-sonnet"},
+            {"id": "claude-3-5-haiku-20241022", "name": "claude-3.5-haiku"},
+            {"id": "claude-3-5-sonnet-20241022", "name": "claude-3.5-sonnet"},
+            {"id": "claude-3-7-sonnet-20250219", "name": "claude-3.7-sonnet"},
+            {"id": "claude-opus-4-20250514", "name": "claude-4-opus"},
+            {"id": "claude-sonnet-4-20250514", "name": "claude-4-sonnet"},
+        ]
 
     async def on_startup(self):
-        logger.info(f"on_startup:{__name__}")
-        self.update_pipelines()
+        print(f"on_startup:{__name__}")
+        pass
 
     async def on_shutdown(self):
-        logger.info(f"on_shutdown:{__name__}")
+        print(f"on_shutdown:{__name__}")
+        pass
 
     async def on_valves_updated(self):
-        logger.info(f"on_valves_updated:{__name__}")
-        self.update_pipelines()
+        self.update_headers()
 
-    def update_pipelines(self) -> None:
-        try:
-            session = boto3.Session(region_name=self.valves.AWS_REGION_NAME)
-            self.bedrock = session.client('bedrock')
-            self.bedrock_runtime = session.client('bedrock-runtime')
-            self.pipelines = self.get_models()
-            logger.info("Successfully initialized AWS clients using IAM role.")
-        except NoCredentialsError:
-            logger.error("No AWS credentials found. Please ensure the IAM role is correctly configured.")
-            self.pipelines = [{"id": "error", "name": "No AWS credentials found. Please check IAM role configuration."}]
-        except ClientError as e:
-            logger.error(f"Failed to initialize AWS clients: {e}")
-            self.pipelines = [{"id": "error", "name": f"Failed to initialize AWS clients: {e}"}]
-        except Exception as e:
-            logger.error(f"Error: {e}")
-            self.pipelines = [
-                {
-                    "id": "error",
-                    "name": "Could not fetch models from Bedrock, please set up AWS Instance/Task Role.",
+    def pipelines(self) -> List[dict]:
+        return self.get_anthropic_models()
+
+    def process_image(self, image_data):
+        if image_data["url"].startswith("data:image"):
+            mime_type, base64_data = image_data["url"].split(",", 1)
+            media_type = mime_type.split(":")[1].split(";")[0]
+            return {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": media_type,
+                    "data": base64_data,
                 },
-            ]
-
-    def get_models(self):
-        try:
-            res = []
-            response = self.bedrock.list_foundation_models(byProvider='Anthropic')
-            for model in response['modelSummaries']:
-                inference_types = model.get('inferenceTypesSupported', [])
-                if "ON_DEMAND" in inference_types:
-                    res.append({'id': model['modelId'], 'name': model['modelName']})
-                elif "INFERENCE_PROFILE" in inference_types:
-                    inferenceProfileId = self.getInferenceProfileId(model['modelArn'])
-                    if inferenceProfileId:
-                        res.append({'id': inferenceProfileId, 'name': model['modelName']})
-
-            return res
-        except Exception as e:
-            logger.error(f"Error fetching models: {e}")
-            return [
-                {
-                    "id": "error",
-                    "name": f"Could not fetch models from Bedrock: {e}",
-                },
-            ]
-
-    def getInferenceProfileId(self, modelArn: str) -> str:
-        response = self.bedrock.list_inference_profiles()
-        for profile in response.get('inferenceProfileSummaries', []):
-            for model in profile.get('models', []):
-                if model.get('modelArn') == modelArn:
-                    return profile['inferenceProfileId']
-        return None
+            }
+        else:
+            return {
+                "type": "image",
+                "source": {"type": "url", "url": image_data["url"]},
+            }
 
     def pipe(
         self, user_message: str, model_id: str, messages: List[dict], body: dict
     ) -> Union[str, Generator, Iterator]:
-        logger.info(f"pipe:{__name__}")
-
-        if not self.bedrock_runtime:
-            return "Error: AWS Bedrock client not initialized. Please check IAM role configuration."
-
-        system_message, messages = pop_system_message(messages)
-
         try:
+            # Remove unnecessary keys
+            for key in ["user", "chat_id", "title"]:
+                body.pop(key, None)
+
+            system_message, messages = pop_system_message(messages)
+
             processed_messages = []
             image_count = 0
+            total_image_size = 0
+
             for message in messages:
                 processed_content = []
                 if isinstance(message.get("content"), list):
                     for item in message["content"]:
                         if item["type"] == "text":
-                            processed_content.append({"text": item["text"]})
+                            processed_content.append(
+                                {"type": "text", "text": item["text"]}
+                            )
                         elif item["type"] == "image_url":
-                            if image_count >= 20:
-                                raise ValueError("Maximum of 20 images per API call exceeded")
+                            if image_count >= 5:
+                                raise ValueError(
+                                    "Maximum of 5 images per API call exceeded"
+                                )
+
                             processed_image = self.process_image(item["image_url"])
                             processed_content.append(processed_image)
+
+                            if processed_image["source"]["type"] == "base64":
+                                image_size = (
+                                    len(processed_image["source"]["data"]) * 3 / 4
+                                )
+                            else:
+                                image_size = 0
+
+                            total_image_size += image_size
+                            if total_image_size > 100 * 1024 * 1024:
+                                raise ValueError(
+                                    "Total size of images exceeds 100 MB limit"
+                                )
+
                             image_count += 1
                 else:
-                    processed_content = [{"text": message.get("content", "")}]
+                    processed_content = [
+                        {"type": "text", "text": message.get("content", "")}
+                    ]
 
-                processed_messages.append({"role": message["role"], "content": processed_content})
+                processed_messages.append(
+                    {"role": message["role"], "content": processed_content}
+                )
 
-            payload = {"modelId": model_id,
-                       "messages": processed_messages,
-                       "system": [{'text': system_message["content"] if system_message else 'You are an intelligent AI assistant'}],
-                       "inferenceConfig": {
-                           "temperature": body.get("temperature", 0.5),
-                           "topP": body.get("top_p", 0.9),
-                           "maxTokens": body.get("max_tokens", 4096),
-                           "stopSequences": body.get("stop", []),
-                        },
-                        "additionalModelRequestFields": {"top_k": body.get("top_k", 200)}
-                       }
+            # Prepare the payload
+            payload = {
+                "model": model_id,
+                "messages": processed_messages,
+                "max_tokens": body.get("max_tokens", 4096),
+                "temperature": body.get("temperature", 0.8),
+                "top_k": body.get("top_k", 40),
+                "top_p": body.get("top_p", 0.9),
+                "stop_sequences": body.get("stop", []),
+                **({"system": str(system_message)} if system_message else {}),
+                "stream": body.get("stream", False),
+            }
 
             if body.get("stream", False):
                 supports_thinking = "claude-3-7" in model_id
@@ -177,91 +175,101 @@ class Pipeline:
                 # Allow users to input an integer value representing budget tokens
                 if (
                     not budget_tokens
+                    and reasoning_effort is not None
                     and reasoning_effort not in REASONING_EFFORT_BUDGET_TOKEN_MAP.keys()
                 ):
                     try:
                         budget_tokens = int(reasoning_effort)
                     except ValueError as e:
-                        logger.error("Failed to convert reasoning effort to int", e)
+                        print("Failed to convert reasoning effort to int", e)
                         budget_tokens = None
 
                 if supports_thinking and budget_tokens:
                     # Check if the combined tokens (budget_tokens + max_tokens) exceeds the limit
-                    max_tokens = payload["inferenceConfig"].get("maxTokens", 4096)
+                    max_tokens = payload.get("max_tokens", 4096)
                     combined_tokens = budget_tokens + max_tokens
 
                     if combined_tokens > MAX_COMBINED_TOKENS:
                         error_message = f"Error: Combined tokens (budget_tokens {budget_tokens} + max_tokens {max_tokens} = {combined_tokens}) exceeds the maximum limit of {MAX_COMBINED_TOKENS}"
-                        logger.error(error_message)
+                        print(error_message)
                         return error_message
 
-                    payload["inferenceConfig"]["maxTokens"] = combined_tokens
-                    payload["additionalModelRequestFields"]["thinking"] = {
+                    payload["max_tokens"] = combined_tokens
+                    payload["thinking"] = {
                         "type": "enabled",
                         "budget_tokens": budget_tokens,
                     }
                     # Thinking requires temperature 1.0 and does not support top_p, top_k
-                    payload["inferenceConfig"]["temperature"] = 1.0
-                    if "top_k" in payload["additionalModelRequestFields"]:
-                        del payload["additionalModelRequestFields"]["top_k"]
-                    if "topP" in payload["inferenceConfig"]:
-                        del payload["inferenceConfig"]["topP"]
-                return self.stream_response(model_id, payload)
+                    payload["temperature"] = 1.0
+                    if "top_k" in payload:
+                        del payload["top_k"]
+                    if "top_p" in payload:
+                        del payload["top_p"]
+                return self.stream_response(payload)
             else:
-                return self.get_completion(model_id, payload)
+                return self.get_completion(payload)
         except Exception as e:
-            logger.error(f"Error in pipe: {e}")
             return f"Error: {e}"
 
-    def process_image(self, image: str):
-        img_stream = None
-        content_type = None
-
-        if image["url"].startswith("data:image"):
-            mime_type, base64_string = image["url"].split(",", 1)
-            content_type = mime_type.split(":")[1].split(";")[0]
-            image_data = base64.b64decode(base64_string)
-            img_stream = BytesIO(image_data)
-        else:
-            response = requests.get(image["url"])
-            img_stream = BytesIO(response.content)
-            content_type = response.headers.get('Content-Type', 'image/jpeg')
-
-        media_type = content_type.split('/')[-1] if '/' in content_type else content_type
-        return {
-            "image": {
-                "format": media_type,
-                "source": {"bytes": img_stream.read()}
-            }
-        }
-
-    def stream_response(self, model_id: str, payload: dict) -> Generator:
+    def stream_response(self, payload: dict) -> Generator:
+        """Used for title and tag generation"""
         try:
-            streaming_response = self.bedrock_runtime.converse_stream(**payload)
+            response = requests.post(
+                self.url, headers=self.headers, json=payload, stream=True
+            )
+            print(f"{response} for {payload}")
 
-            in_reasoning_context = False
-            for chunk in streaming_response["stream"]:
-                if in_reasoning_context and "contentBlockStop" in chunk:
-                    in_reasoning_context = False
-                    yield "\n </think> \n\n"
-                elif "contentBlockDelta" in chunk and "delta" in chunk["contentBlockDelta"]:
-                    if "reasoningContent" in chunk["contentBlockDelta"]["delta"]:
-                        if not in_reasoning_context:
-                            yield "<think>"
+            if response.status_code == 200:
+                client = sseclient.SSEClient(response)
+                for event in client.events():
+                    try:
+                        data = json.loads(event.data)
+                        if data["type"] == "content_block_start":
+                            if data["content_block"]["type"] == "thinking":
+                                yield "<think>"
+                            else:
+                                yield data["content_block"]["text"]
+                        elif data["type"] == "content_block_delta":
+                            if data["delta"]["type"] == "thinking_delta":
+                                yield data["delta"]["thinking"]
+                            elif data["delta"]["type"] == "signature_delta":
+                                yield "\n </think> \n\n"
+                            else:
+                                yield data["delta"]["text"]
+                        elif data["type"] == "message_stop":
+                            break
+                    except json.JSONDecodeError:
+                        print(f"Failed to parse JSON: {event.data}")
+                        yield f"Error: Failed to parse JSON response"
+                    except KeyError as e:
+                        print(f"Unexpected data structure: {e} for payload {payload}")
+                        print(f"Full data: {data}")
+                        yield f"Error: Unexpected data structure: {e}"
+            else:
+                error_message = f"Error: {response.status_code} - {response.text}"
+                print(error_message)
+                yield error_message
+        except Exception as e:
+            error_message = f"Error: {str(e)}"
+            print(error_message)
+            yield error_message
 
-                        in_reasoning_context = True
-                        if "text" in chunk["contentBlockDelta"]["delta"]["reasoningContent"]:
-                            yield chunk["contentBlockDelta"]["delta"]["reasoningContent"]["text"]
-                    elif "text" in chunk["contentBlockDelta"]["delta"]:
-                        yield chunk["contentBlockDelta"]["delta"]["text"]
-        except ClientError as e:
-            logger.error(f"Error in stream_response: {e}")
-            yield f"Error: {e}"
-
-    def get_completion(self, model_id: str, payload: dict) -> str:
+    def get_completion(self, payload: dict) -> str:
         try:
-            response = self.bedrock_runtime.converse(**payload)
-            return response['output']['message']['content'][0]['text']
-        except ClientError as e:
-            logger.error(f"Error in get_completion: {e}")
-            return f"Error: {e}"
+            response = requests.post(self.url, headers=self.headers, json=payload)
+            print(response, payload)
+            if response.status_code == 200:
+                res = response.json()
+                for content in res["content"]:
+                    if not content.get("text"):
+                        continue
+                    return content["text"]
+                return ""
+            else:
+                error_message = f"Error: {response.status_code} - {response.text}"
+                print(error_message)
+                return error_message
+        except Exception as e:
+            error_message = f"Error: {str(e)}"
+            print(error_message)
+            return error_message
